@@ -1027,14 +1027,92 @@ await spoke.liquidate(
 
 export default function Docs() {
   const [activePage, setActivePage] = useState('Introduction');
+  const [searchQuery, setSearchQuery] = useState('');
   const navigate = useNavigate();
 
   const content = DOCS_CONTENT[activePage] || (
     <p className="text-gray-600">Content coming soon...</p>
   );
 
-  // Get next page for navigation
+  // Get all pages
   const allPages = DOCS_SECTIONS.flatMap(section => section.items);
+  
+  // Search function - searches through page titles and content
+  const searchPages = (query: string) => {
+    if (!query.trim()) {
+      return allPages;
+    }
+    
+    const lowerQuery = query.toLowerCase();
+    return allPages.filter(page => {
+      // Search in page title
+      if (page.toLowerCase().includes(lowerQuery)) {
+        return true;
+      }
+      
+      // Search in page content
+      const pageContent = DOCS_CONTENT[page];
+      if (pageContent) {
+        // Extract text from JSX element
+        const textContent = extractTextFromJSX(pageContent);
+        return textContent.toLowerCase().includes(lowerQuery);
+      }
+      
+      return false;
+    });
+  };
+
+  // Helper function to extract text from JSX
+  const extractTextFromJSX = (element: any): string => {
+    if (typeof element === 'string' || typeof element === 'number') {
+      return String(element);
+    }
+    if (Array.isArray(element)) {
+      return element.map(extractTextFromJSX).join(' ');
+    }
+    if (element && typeof element === 'object') {
+      if (element.props && element.props.children) {
+        return extractTextFromJSX(element.props.children);
+      }
+      // Handle React fragments
+      if (element.type && element.type.toString().includes('Fragment')) {
+        return extractTextFromJSX(element.props?.children);
+      }
+    }
+    return '';
+  };
+
+  // Helper function to highlight search matches
+  const highlightMatch = (text: string, query: string): JSX.Element => {
+    if (!query.trim()) {
+      return <>{text}</>;
+    }
+    
+    const parts = text.split(new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'));
+    return (
+      <>
+        {parts.map((part, index) => 
+          part.toLowerCase() === query.toLowerCase() ? (
+            <mark key={index} className="bg-yellow-200 text-gray-900 px-0.5 rounded">
+              {part}
+            </mark>
+          ) : (
+            <span key={index}>{part}</span>
+          )
+        )}
+      </>
+    );
+  };
+
+  // Filter sections based on search
+  const filteredSections = searchQuery.trim() 
+    ? DOCS_SECTIONS.map(section => ({
+        ...section,
+        items: section.items.filter(item => searchPages(searchQuery).includes(item))
+      })).filter(section => section.items.length > 0)
+    : DOCS_SECTIONS;
+
+  // Get next page for navigation
   const currentIndex = allPages.indexOf(activePage);
   const nextPage = currentIndex < allPages.length - 1 ? allPages[currentIndex + 1] : null;
   const prevPage = currentIndex > 0 ? allPages[currentIndex - 1] : null;
@@ -1055,37 +1133,60 @@ export default function Docs() {
                 <input 
                     type="text" 
                     placeholder="Search docs..." 
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
                     className="w-full pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all"
                 />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600"
+                  >
+                    ×
+                  </button>
+                )}
             </div>
 
             <div className="space-y-8">
-                {DOCS_SECTIONS.map((section, idx) => (
+                {searchQuery.trim() && searchPages(searchQuery).length === 0 ? (
+                  <div className="text-sm text-gray-500 text-center py-4">
+                    No results found for "{searchQuery}"
+                  </div>
+                ) : (
+                  filteredSections.map((section, idx) => (
                     <div key={idx}>
-                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 px-2">
-                  {section.title}
-                </h4>
-                        <ul className="space-y-1">
-                            {section.items.map(item => (
-                                <li key={item}>
-                                    <button 
-                        onClick={() => {
-                          setActivePage(item);
-                          window.scrollTo({ top: 0, behavior: 'smooth' });
-                        }}
-                        className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                          activePage === item 
-                            ? 'bg-white text-brand-600 shadow-sm border border-gray-100' 
-                            : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'
-                        }`}
-                                    >
-                                        {item}
-                                    </button>
-                                </li>
-                            ))}
-                        </ul>
+                      <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 px-2">
+                        {section.title}
+                      </h4>
+                      <ul className="space-y-1">
+                        {section.items.map(item => {
+                          const isMatch = searchQuery.trim() && 
+                            (item.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                             extractTextFromJSX(DOCS_CONTENT[item] || <></>).toLowerCase().includes(searchQuery.toLowerCase()));
+                          
+                          return (
+                            <li key={item}>
+                              <button 
+                                onClick={() => {
+                                  setActivePage(item);
+                                  setSearchQuery(''); // Clear search when navigating
+                                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                                }}
+                                className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                                  activePage === item 
+                                    ? 'bg-white text-brand-600 shadow-sm border border-gray-100' 
+                                    : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'
+                                } ${isMatch ? 'bg-blue-50 border border-blue-200' : ''}`}
+                              >
+                                {highlightMatch(item, searchQuery)}
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
                     </div>
-                ))}
+                  ))
+                )}
             </div>
         </div>
       </aside>
