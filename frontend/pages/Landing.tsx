@@ -430,7 +430,7 @@ export default function Landing() {
           <div className="flex gap-8 text-sm font-medium text-gray-500">
             <Link to="/app" className="hover:text-indigo-600 transition-colors">App</Link>
             <Link to="/docs" className="hover:text-indigo-600 transition-colors">Docs</Link>
-            <a href="#" className="hover:text-indigo-600 transition-colors">GitHub</a>
+            <a href="https://github.com/papatortass/Aarce" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-600 transition-colors">GitHub</a>
           </div>
           <p className="text-xs text-gray-400">© 2024 Aarce Protocol.</p>
         </div>
