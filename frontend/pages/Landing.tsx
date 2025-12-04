@@ -5,10 +5,9 @@ import { Button } from '../components/UI';
 
 const Logo = () => (
   <img 
-    src="https://assets.coingecko.com/coins/images/12645/standard/aave-token-round.png" 
-    alt="Aave" 
+    src="/logo-dark.svg" 
+    alt="Aarce" 
     className="w-8 h-8"
-    style={{ transform: 'rotate(180deg)' }}
   />
 );
 

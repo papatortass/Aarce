@@ -12,13 +12,12 @@ interface ModalContextType {
 }
 export const ModalContext = createContext<ModalContextType>({} as ModalContextType);
 
-// Aave Logo (upside down)
+// Aarce Logo
 const BrandLogo = () => (
     <img 
-        src="https://assets.coingecko.com/coins/images/12645/standard/aave-token-round.png" 
-        alt="Aave" 
+        src="/logo.svg" 
+        alt="Aarce" 
         className="w-6 h-6"
-        style={{ transform: 'rotate(180deg)' }}
     />
 );
 

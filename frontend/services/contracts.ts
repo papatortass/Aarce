@@ -1721,9 +1721,9 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
     });
 
     const hubAddress = reserve.hub as Address;
-    const assetId = reserve.assetId;
+    const assetId = BigInt(reserve.assetId);
     const decimals = reserve.decimals;
-    const dynamicConfigKey = reserve.dynamicConfigKey;
+    const dynamicConfigKey = BigInt(reserve.dynamicConfigKey);
 
     // Get liquidity (supplied assets)
     const suppliedAssets = await publicClient.readContract({
@@ -1863,8 +1863,32 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
     // Get price
     const price = await getAssetPrice(assetSymbol);
 
-    // Format liquidity
-    const liquidityFormatted = parseFloat(formatUnits(suppliedAssets, decimals));
+    // Format liquidity - need to handle decimal mismatch between reserve and token
+    // Get actual token decimals
+    const tokenDecimals = await getAssetDecimals(assetAddress);
+    const reserveDecimals = Number(decimals);
+    
+    let liquidityFormatted: number;
+    // If reserve decimals don't match token decimals, we need to adjust
+    if (reserveDecimals !== tokenDecimals) {
+      const decimalDiff = tokenDecimals - reserveDecimals;
+      if (decimalDiff > 0) {
+        // Token has more decimals than reserve - divide to correct
+        // This means the contract stores values with fewer decimals than the token
+        const divisor = 10n ** BigInt(decimalDiff);
+        const correctedAmount = suppliedAssets / divisor;
+        liquidityFormatted = parseFloat(formatUnits(correctedAmount, reserveDecimals));
+      } else {
+        // Token has fewer decimals than reserve - multiply to correct
+        // This means the contract stores values with more decimals than the token
+        const multiplier = 10n ** BigInt(-decimalDiff);
+        const correctedAmount = suppliedAssets * multiplier;
+        liquidityFormatted = parseFloat(formatUnits(correctedAmount, reserveDecimals));
+      }
+    } else {
+      // Use reserve decimals if they match
+      liquidityFormatted = parseFloat(formatUnits(suppliedAssets, decimals));
+    }
 
     return {
       supplyApy: Math.max(0, supplyApy),
