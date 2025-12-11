@@ -90,6 +90,18 @@ interface IHubBase {
     uint256 shares
   );
 
+  /// @notice Emitted on flash loan execution.
+  /// @param assetId The identifier of the asset.
+  /// @param receiver The address of the flash loan receiver.
+  /// @param amount The amount of the flash loan.
+  /// @param fee The fee amount charged.
+  event FlashLoan(
+    uint256 indexed assetId,
+    address indexed receiver,
+    uint256 amount,
+    uint256 fee
+  );
+
   /// @notice Add asset on behalf of user.
   /// @dev Only callable by active spokes.
   /// @dev Underlying assets must be transferred to the Hub before invocation.
@@ -323,4 +335,17 @@ interface IHubBase {
   /// @param spoke The address of the spoke.
   /// @return The amount of deficit, expressed in asset units and scaled by RAY.
   function getSpokeDeficitRay(uint256 assetId, address spoke) external view returns (uint256);
+
+  /// @notice Executes a flash loan.
+  /// @dev The receiver must implement IFlashLoanReceiver and repay the loan + fee in executeOperation.
+  /// @param assetId The identifier of the asset.
+  /// @param receiver The address of the flash loan receiver contract.
+  /// @param amount The amount of the flash loan.
+  /// @param params Additional parameters to pass to executeOperation.
+  function flashLoan(
+    uint256 assetId,
+    address receiver,
+    uint256 amount,
+    bytes calldata params
+  ) external;
 }

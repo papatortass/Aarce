@@ -1,6 +1,6 @@
 import React, { createContext, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { LayoutDashboard, Wallet, BookOpen, Menu, Power, ChevronRight, AlertCircle } from 'lucide-react';
+import { LayoutDashboard, Wallet, BookOpen, Menu, Power, ChevronRight, AlertCircle, Zap } from 'lucide-react';
 import { Button } from '../components/UI';
 import { AssetModal } from '../components/AssetModal';
 import { Asset, ModalTab } from '../types';
@@ -64,6 +64,7 @@ export const AppLayout: React.FC = () => {
                 {[
                     { name: 'Dashboard', path: '/app', icon: LayoutDashboard, exact: true },
                     { name: 'Markets', path: '/app/markets', icon: Wallet },
+                    { name: 'Flash Loans', path: '/app/flash-loans', icon: Zap },
                     { name: 'Docs', path: '/docs', icon: BookOpen },
                 ].map((item) => (
                     <NavLink

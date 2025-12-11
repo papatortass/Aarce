@@ -75,6 +75,7 @@ export default function Markets() {
         </Card>
       )}
 
+
       {isContractAddressSet && !isLoading && assets.length === 0 && (
         <Card className="bg-blue-50 border-blue-200">
           <div className="flex items-start gap-3">

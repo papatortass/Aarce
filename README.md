@@ -21,6 +21,7 @@ Aarce Protocol is a decentralized lending and borrowing platform built on Aave V
 
 - **Supply assets** and earn interest
 - **Borrow assets** against collateral
+- **Execute flash loans** for arbitrage and other DeFi operations
 - **Manage positions** with real-time health factor monitoring
 - **Track portfolio** performance across multiple assets
 
@@ -30,10 +31,56 @@ The protocol currently supports **USDC**, **EURC**, and **USDT** on Arc Testnet.
 
 Aarce follows Aave V4's modular **hub-and-spoke design** that separates liquidity management from user-facing operations:
 
+### Core Components
+
 - **Hub**: Centralized liquidity management and asset configuration
+  - Manages all asset liquidity in a unified pool
+  - Handles flash loans directly
+  - Tracks interest accrual and debt
+  - Address: `0xEA8365e81f8D9059eEB7353B4Bd6D78031D63423`
+
 - **Spoke**: User-facing interface for supply, borrow, and position management
+  - Routes user operations to the Hub
+  - Manages user positions and collateral
+  - Enforces risk parameters
+  - Address: `0x3969D9c125D144a4653B52F2b6d3EC95BbAad1dD`
+
 - **Oracle**: Price feed system (currently using mock oracle for testnet)
 - **Interest Rate Strategy**: Dynamic interest rate calculation based on utilization
+
+### Unified Architecture
+
+The protocol uses a unified architecture where all operations share the same liquidity pool:
+
+```
+┌─────────────┐
+│   Frontend  │
+└──────┬──────┘
+       │
+       ├─────────────────┐
+       │                 │
+       ▼                 ▼
+┌─────────────┐   ┌─────────────┐
+│    Spoke    │   │  Direct Hub │
+│ (Supply/    │   │  (Flash     │
+│  Borrow)    │   │   Loans)    │
+└──────┬──────┘   └──────┬───────┘
+       │                 │
+       └────────┬────────┘
+                │
+                ▼
+         ┌─────────────┐
+         │     Hub     │
+         │ (Unified    │
+         │  Liquidity) │
+         └─────────────┘
+```
+
+**Key Points:**
+- Supply and borrow operations go through the Spoke, which routes to the Hub
+- Flash loans interact directly with the Hub
+- All operations share the same liquidity pool
+- Liquidity supplied through the Spoke is immediately available for flash loans
 
 The frontend is built with React and TypeScript, using Vite for fast development and builds. It connects to the Arc Testnet via Web3 wallet integration.
 
@@ -44,6 +91,8 @@ Aarce/
 ├── contracts/                    # Smart contracts (Aave V4)
 │   ├── src/                      # Main source code
 │   │   ├── hub/                  # Hub contracts and interfaces
+│   │   │   ├── Hub.sol           # Main Hub contract
+│   │   │   └── examples/         # Flash loan receiver examples
 │   │   ├── spoke/                # Spoke contracts and interfaces
 │   │   ├── position-manager/     # Position Managers and gateways
 │   │   ├── libraries/            # Shared libraries (math, types)
@@ -55,10 +104,9 @@ Aarce/
 │   │   └── mocks/                # Mock contracts
 │   ├── scripts/                  # Deployment scripts
 │   │   ├── DeployArc.s.sol      # Main deployment script
-│   │   ├── AddUSDC.s.sol        # Add USDC asset
-│   │   ├── AddEURC.s.sol        # Add EURC asset
-│   │   ├── AddUSDT.s.sol        # Add USDT asset
-│   │   └── ConfigureInterestRates.s.sol
+│   │   ├── DeployHubWithFlashLoan.s.sol  # Hub deployment
+│   │   ├── DeployAndSetupNewSpokeForNewHub.s.sol  # Spoke deployment
+│   │   └── ...                   # Asset configuration scripts
 │   ├── snapshots/                # Gas snapshots
 │   └── docs/                     # Documentation
 ├── frontend/                      # Web application
@@ -67,6 +115,7 @@ Aarce/
 │   │   │   ├── Landing.tsx      # Landing page
 │   │   │   ├── Markets.tsx     # Markets overview
 │   │   │   ├── Dashboard.tsx    # User dashboard
+│   │   │   ├── FlashLoans.tsx   # Flash loans interface
 │   │   │   └── Docs.tsx         # Documentation
 │   │   ├── components/           # Reusable components
 │   │   │   ├── AssetModal.tsx   # Supply/Borrow modal
@@ -93,6 +142,7 @@ Aarce/
 
 - ✅ Supply assets and earn interest
 - ✅ Borrow assets against collateral
+- ✅ Execute flash loans (0.09% fee)
 - ✅ Withdraw supplied assets (with health factor checks)
 - ✅ Repay borrowed assets
 - ✅ Real-time health factor monitoring
@@ -100,14 +150,31 @@ Aarce/
 - ✅ Dynamic APY calculations
 - ✅ Collateral management
 
+### Flash Loans
+
+Flash loans enable users to borrow assets without collateral, as long as the loan is repaid (plus fee) within the same transaction. This enables:
+
+- Arbitrage opportunities across DEXes
+- Collateral swaps
+- Debt refinancing
+- Other advanced DeFi strategies
+
+**Flash Loan Fee:** 0.09% (9 basis points)
+
+**Requirements:**
+- Flash loan receiver contract must implement `IFlashLoanReceiver`
+- Receiver must have sufficient balance to cover the fee before execution
+- Loan + fee must be repaid within the same transaction
+
 ### Frontend Features
 
-- 🎨 Modern, minimalist UI design
-- 🔐 Web3 wallet integration (MetaMask, WalletConnect, etc.)
-- 📊 Real-time market data
-- 💼 Personal portfolio dashboard
-- 📱 Responsive design
-- 📖 Comprehensive documentation
+- Modern, minimalist UI design
+- Web3 wallet integration (MetaMask, WalletConnect, etc.)
+- Real-time market data
+- Personal portfolio dashboard
+- Flash loan interface
+- Responsive design
+- Comprehensive documentation
 
 ## Dependencies
 
@@ -169,7 +236,7 @@ cd contracts
 
 # Copy environment template and populate
 cp .env.example .env
-# Edit .env with your configuration (see contracts/ARC_DEPLOYMENT.md)
+# Edit .env with your configuration
 
 # Install Foundry dependencies
 forge install
@@ -273,33 +340,27 @@ Deploy to Arc Testnet:
 ```bash
 cd contracts
 
-# 1. Deploy core contracts
-forge script scripts/DeployArc.s.sol:DeployArc \
-  --rpc-url arc_testnet \
+# 1. Deploy Hub with flash loan support
+forge script scripts/DeployHubWithFlashLoan.s.sol:DeployHubWithFlashLoan \
+  --rpc-url https://rpc.testnet.arc.network \
   --broadcast \
   --verify \
   -vvvv
 
-# 2. Configure contracts
-forge script scripts/ConfigureArc.s.sol:ConfigureArc \
-  --rpc-url arc_testnet \
+# 2. Deploy and configure Spoke
+forge script scripts/DeployAndSetupNewSpokeForNewHub.s.sol:DeployAndSetupNewSpokeForNewHub \
+  --rpc-url https://rpc.testnet.arc.network \
   --broadcast \
   -vvvv
 
 # 3. Add assets (example: USDC)
-forge script scripts/AddUSDC.s.sol:AddUSDC \
-  --rpc-url arc_testnet \
-  --broadcast \
-  -vvvv
-
-# 4. Configure interest rates
-forge script scripts/ConfigureInterestRates.s.sol:ConfigureInterestRates \
-  --rpc-url arc_testnet \
+forge script scripts/AddAllAssetsToNewHub.s.sol:AddAllAssetsToNewHub \
+  --rpc-url https://rpc.testnet.arc.network \
   --broadcast \
   -vvvv
 ```
 
-For detailed deployment instructions, see [contracts/ARC_DEPLOYMENT.md](./contracts/ARC_DEPLOYMENT.md)
+For detailed deployment instructions, see the deployment scripts in `contracts/scripts/`.
 
 ### Frontend
 
@@ -309,7 +370,9 @@ After deploying contracts, update the contract addresses in `frontend/config/con
 
 ```typescript
 export const CONTRACT_ADDRESSES = {
-  SPOKE: '0x...' as Address, // Your deployed Spoke address
+  SPOKE: '0x3969D9c125D144a4653B52F2b6d3EC95BbAad1dD' as Address,
+  HUB_NEW: '0xEA8365e81f8D9059eEB7353B4Bd6D78031D63423' as Address,
+  SIMPLE_FLASH_LOAN_RECEIVER: '0x5aaCE9d8aF196EeACBe363a5e44c9736Fb738559' as Address,
   USDC_RESERVE_ID: 0n,
 } as const;
 ```
@@ -340,6 +403,7 @@ The frontend is a React application built with:
 - **Landing** (`/`) - Welcome page with protocol overview
 - **Markets** (`/markets`) - Browse available assets and market data
 - **Dashboard** (`/dashboard`) - Personal portfolio and positions
+- **Flash Loans** (`/flash-loans`) - Execute flash loans
 - **Docs** (`/docs`) - Protocol documentation
 
 ### Wallet Integration
@@ -414,4 +478,3 @@ This project is based on [Aave V4](https://github.com/aave/aave-v4), which uses 
 ---
 
 **Note**: This is an experimental implementation on testnet. Use at your own risk.
-

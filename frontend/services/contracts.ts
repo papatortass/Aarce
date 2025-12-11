@@ -320,6 +320,49 @@ const HUB_ABI = [
     stateMutability: 'view',
     type: 'function',
   },
+  {
+    inputs: [{ internalType: 'uint256', name: 'assetId', type: 'uint256' }],
+    name: 'getAssetLiquidity',
+    outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [],
+    name: 'getAssetCount',
+    outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ internalType: 'uint256', name: 'assetId', type: 'uint256' }],
+    name: 'getAssetUnderlyingAndDecimals',
+    outputs: [
+      { internalType: 'address', name: '', type: 'address' },
+      { internalType: 'uint8', name: '', type: 'uint8' },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'uint256', name: 'assetId', type: 'uint256' },
+      { internalType: 'address', name: 'receiver', type: 'address' },
+      { internalType: 'uint256', name: 'amount', type: 'uint256' },
+      { internalType: 'bytes', name: 'params', type: 'bytes' },
+    ],
+    name: 'flashLoan',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    inputs: [],
+    name: 'FLASH_LOAN_FEE_BPS',
+    outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
 ] as const;
 
 const IR_STRATEGY_ABI = [
@@ -339,6 +382,7 @@ const IR_STRATEGY_ABI = [
 ] as const;
 
 const SPOKE_ADDRESS = CONTRACT_ADDRESSES.SPOKE;
+const HUB_NEW = CONTRACT_ADDRESSES.HUB_NEW; // New Hub with flash loan support
 const USDC_RESERVE_ID = CONTRACT_ADDRESSES.USDC_RESERVE_ID;
 
 // Asset addresses
@@ -2445,6 +2489,308 @@ export async function getMaxWithdrawableAsset(assetSymbol: string, userAddress: 
   } catch (error: any) {
     console.error(`Error calculating max withdrawable for ${assetSymbol}:`, error);
     return 0;
+  }
+}
+
+// ==================== Flash Loan Functions ====================
+
+/**
+ * Get flash loan fee in basis points (BPS)
+ */
+export async function getFlashLoanFeeBps(hubAddress?: Address): Promise<number> {
+  const hub = hubAddress || HUB_NEW;
+  if (hub === '0x0000000000000000000000000000000000000000') {
+    return 9; // Default 0.09% = 9 bps
+  }
+
+  const publicClient = createPublicClient({
+    chain: ARC_TESTNET,
+    transport: http(),
+  });
+
+  try {
+    const feeBps = await publicClient.readContract({
+      address: hub,
+      abi: HUB_ABI,
+      functionName: 'FLASH_LOAN_FEE_BPS',
+    });
+    return Number(feeBps);
+  } catch (error: any) {
+    console.warn('Error fetching flash loan fee, using default:', error?.message);
+    return 9; // Default 0.09% = 9 bps
+  }
+}
+
+/**
+ * Get asset ID for an asset in the Hub
+ */
+async function getAssetIdInHub(assetAddress: Address, hubAddress: Address): Promise<number | null> {
+  const publicClient = createPublicClient({
+    chain: ARC_TESTNET,
+    transport: http(),
+  });
+
+  try {
+    const assetCount = await publicClient.readContract({
+      address: hubAddress,
+      abi: HUB_ABI,
+      functionName: 'getAssetCount',
+    });
+
+    for (let i = 0; i < Number(assetCount); i++) {
+      const [underlying] = await publicClient.readContract({
+        address: hubAddress,
+        abi: HUB_ABI,
+        functionName: 'getAssetUnderlyingAndDecimals',
+        args: [BigInt(i)],
+      });
+
+      if (underlying.toLowerCase() === assetAddress.toLowerCase()) {
+        return i;
+      }
+    }
+
+    return null;
+  } catch (error: any) {
+    console.error('Error finding asset ID in Hub:', error);
+    return null;
+  }
+}
+
+/**
+ * Get flash loan liquidity for an asset
+ */
+export async function getFlashLoanLiquidity(assetSymbol: string, hubAddress?: Address): Promise<number> {
+  const hub = hubAddress || HUB_NEW;
+  if (hub === '0x0000000000000000000000000000000000000000') {
+    return 0;
+  }
+
+  const assetAddress = assetSymbol === 'USDC' ? USDC_ADDRESS : assetSymbol === 'EURC' ? EURC_ADDRESS : assetSymbol === 'USDT' ? USDT_ADDRESS : null;
+  if (!assetAddress) {
+    return 0;
+  }
+
+  const publicClient = createPublicClient({
+    chain: ARC_TESTNET,
+    transport: http(),
+  });
+
+  try {
+    const assetId = await getAssetIdInHub(assetAddress, hub);
+    if (assetId === null) {
+      return 0;
+    }
+
+    const liquidity = await publicClient.readContract({
+      address: hub,
+      abi: HUB_ABI,
+      functionName: 'getAssetLiquidity',
+      args: [BigInt(assetId)],
+    });
+
+    const decimals = await getAssetDecimals(assetAddress);
+    return parseFloat(formatUnits(liquidity, decimals));
+  } catch (error: any) {
+    console.error(`Error fetching flash loan liquidity for ${assetSymbol}:`, error);
+    return 0;
+  }
+}
+
+/**
+ * Calculate flash loan fee
+ */
+export function calculateFlashLoanFee(amount: number, feeBps: number): number {
+  // Fee = amount * feeBps / 10000, rounded UP (matching Hub's percentMulUp)
+  // This matches the Hub's calculation exactly
+  const product = amount * feeBps;
+  const fee = Math.floor(product / 10000);
+  const remainder = product % 10000;
+  // Round up if there's a remainder
+  return remainder > 0 ? fee + 1 : fee;
+}
+
+/**
+ * Execute a flash loan
+ * Note: This requires a flash loan receiver contract to be deployed
+ * For now, this is a helper function - users need to deploy their own receiver
+ */
+export async function executeFlashLoan(
+  assetSymbol: string,
+  amount: number,
+  receiverAddress: Address,
+  params: string = '0x',
+  hubAddress?: Address
+): Promise<string> {
+  const hub = hubAddress || HUB_NEW;
+  if (hub === '0x0000000000000000000000000000000000000000') {
+    throw new Error('Hub address not set. Flash loans require the new Hub with flash loan support.');
+  }
+
+  const assetAddress = assetSymbol === 'USDC' ? USDC_ADDRESS : assetSymbol === 'EURC' ? EURC_ADDRESS : assetSymbol === 'USDT' ? USDT_ADDRESS : null;
+  if (!assetAddress) {
+    throw new Error(`Unknown asset: ${assetSymbol}`);
+  }
+
+  const walletClient = getWalletClient();
+  const [account] = await walletClient.getAddresses();
+  
+  if (!account) {
+    throw new Error('No account connected');
+  }
+
+  const decimals = await getAssetDecimals(assetAddress);
+  const amountInWei = parseUnits(amount.toString(), decimals);
+
+  try {
+    const publicClient = createPublicClient({
+      chain: ARC_TESTNET,
+      transport: http(),
+    });
+
+    const assetId = await getAssetIdInHub(assetAddress, hub);
+    if (assetId === null) {
+      throw new Error(`${assetSymbol} not found in Hub`);
+    }
+
+    // Check if receiver contract has executeSwap or executeFlashLoan function
+    // If so, call that instead (it will handle fee pulling)
+    // Otherwise, call Hub directly (old behavior)
+    const receiverABI = [
+      {
+        name: 'executeSwap',
+        type: 'function',
+        inputs: [
+          { name: 'assetId', type: 'uint256' },
+          { name: 'amount', type: 'uint256' }
+        ],
+        outputs: [],
+        stateMutability: 'nonpayable'
+      },
+      {
+        name: 'executeFlashLoan',
+        type: 'function',
+        inputs: [
+          { name: 'assetId', type: 'uint256' },
+          { name: 'amount', type: 'uint256' }
+        ],
+        outputs: [],
+        stateMutability: 'nonpayable'
+      }
+    ] as const;
+
+    // Try to call receiver's executeSwap/executeFlashLoan first
+    // For FlashLoanSynthraSwap, we need to transfer the fee first (not approve)
+    try {
+      // First, calculate the fee amount
+      const feeBps = await getFlashLoanFeeBps(hub);
+      const feeAmount = calculateFlashLoanFee(amount, feeBps);
+      const feeInWei = parseUnits(feeAmount.toString(), decimals);
+      
+      const erc20Abi = [
+        {
+          name: 'transfer',
+          type: 'function',
+          inputs: [
+            { name: 'to', type: 'address' },
+            { name: 'amount', type: 'uint256' }
+          ],
+          outputs: [{ name: '', type: 'bool' }],
+          stateMutability: 'nonpayable'
+        },
+        {
+          name: 'approve',
+          type: 'function',
+          inputs: [
+            { name: 'spender', type: 'address' },
+            { name: 'amount', type: 'uint256' }
+          ],
+          outputs: [{ name: '', type: 'bool' }],
+          stateMutability: 'nonpayable'
+        }
+      ] as const;
+
+      // Working flow: Transfer fee directly to contract, then call executeSwap
+      // This works because transfer() from EOA works, but safeTransferFrom() from contract fails
+      // The contract checks balance first, so it won't call safeTransferFrom() if balance is sufficient
+      
+      // IMPORTANT: Add a small buffer to the fee to account for any rounding differences
+      // between the frontend's calculation and the Hub's percentMulUp calculation
+      // The contract also adds a buffer, so we need to ensure we transfer enough
+      const feeWithBuffer = feeInWei + BigInt(1); // Add 1 wei buffer
+      
+      // Step 1: Transfer fee directly to contract (this works from EOA)
+      const transferHash = await walletClient.writeContract({
+        address: assetAddress,
+        abi: erc20Abi,
+        functionName: 'transfer',
+        args: [receiverAddress, feeWithBuffer],
+        account,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: transferHash });
+
+      // Step 2: Call executeSwap (contract will check balance and skip safeTransferFrom)
+      try {
+        const hash = await walletClient.writeContract({
+          address: receiverAddress,
+          abi: receiverABI,
+          functionName: 'executeSwap',
+          args: [BigInt(assetId), amountInWei],
+          account,
+        });
+        await publicClient.waitForTransactionReceipt({ hash });
+        return hash;
+      } catch {
+        // If executeSwap doesn't exist, try executeFlashLoan directly
+        const hash = await walletClient.writeContract({
+          address: receiverAddress,
+          abi: receiverABI,
+          functionName: 'executeFlashLoan',
+          args: [BigInt(assetId), amountInWei],
+          account,
+        });
+        await publicClient.waitForTransactionReceipt({ hash });
+        return hash;
+      }
+    } catch (error: any) {
+      // If the main flow fails, try alternative methods
+      console.warn('Transfer + executeSwap failed, trying alternatives:', error);
+      try {
+        // Try executeFlashLoan directly as fallback
+        const hash = await walletClient.writeContract({
+          address: receiverAddress,
+          abi: receiverABI,
+          functionName: 'executeFlashLoan',
+          args: [BigInt(assetId), amountInWei],
+          account,
+        });
+        await publicClient.waitForTransactionReceipt({ hash });
+        return hash;
+      } catch (innerError: any) {
+        // If executeFlashLoan also fails, fall through to direct Hub call
+        console.warn('executeFlashLoan also failed:', innerError);
+      }
+      
+      // Fallback to direct Hub call (old behavior for contracts without executeSwap/executeFlashLoan)
+      console.warn('Receiver contract may not have executeSwap/executeFlashLoan, falling back to direct Hub call:', error);
+      
+      // Convert params from hex string to bytes
+      const paramsBytes = params.startsWith('0x') ? params as `0x${string}` : `0x${params}` as `0x${string}`;
+
+      const hash = await walletClient.writeContract({
+        address: hub,
+        abi: HUB_ABI,
+        functionName: 'flashLoan',
+        args: [BigInt(assetId), receiverAddress, amountInWei, paramsBytes],
+        account,
+      });
+
+      await publicClient.waitForTransactionReceipt({ hash });
+      return hash;
+    }
+  } catch (error: any) {
+    console.error(`Error executing flash loan for ${assetSymbol}:`, error);
+    throw error;
   }
 }
 

@@ -2,7 +2,10 @@
 src = 'src'
 test = 'tests'
 out = 'out'
-libs = ['lib']
+libs = ['lib', 'node_modules']
+remappings = [
+  '@synthra-swap/=node_modules/@synthra-swap/'
+]
 fs_permissions = [{ access = "read", path = "tests/mocks/JsonBindings.sol" }]
 solc_version = "0.8.28"
 evm_version = "cancun"

@@ -23,7 +23,7 @@ export const ASSET_CONFIGS = {
     price: 1.08, // Approximate EUR/USD rate
   },
   USDT: {
-    decimals: 6,
+    decimals: 18, // USDT on Arc testnet has 18 decimals
     price: 1.00,
   },
 } as const;

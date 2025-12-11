@@ -9,8 +9,8 @@ const DOCS_CONTENT: Record<string, JSX.Element> = {
     <>
       <p className="text-xl text-gray-500 leading-relaxed mb-8">
         Aarce is a decentralized non-custodial liquidity protocol built on the Arc Testnet, 
-        implementing the Aave V4 architecture. Users can supply assets to earn interest or borrow 
-        assets using their supplied collateral.
+        implementing the Aave V4 architecture. Users can supply assets to earn interest, borrow 
+        assets using their supplied collateral, or execute flash loans for advanced DeFi strategies.
       </p>
 
       <div className="my-8 p-6 bg-amber-50 border border-amber-200 rounded-2xl">
@@ -31,6 +31,7 @@ const DOCS_CONTENT: Record<string, JSX.Element> = {
       <ul className="space-y-2 list-disc pl-6 text-gray-600 mb-6">
         <li><strong>Supply assets:</strong> Deposit supported tokens to earn interest on your deposits</li>
         <li><strong>Borrow assets:</strong> Use your supplied assets as collateral to borrow other supported tokens</li>
+        <li><strong>Flash loans:</strong> Borrow assets without collateral for arbitrage and other strategies</li>
         <li><strong>Earn yield:</strong> Interest accrues continuously on both supplied and borrowed positions</li>
       </ul>
 
@@ -98,43 +99,63 @@ const DOCS_CONTENT: Record<string, JSX.Element> = {
 
       <h2 className="text-2xl mt-12 mb-4 text-gray-900">Architecture Overview</h2>
       <p className="text-gray-600 mb-6">
-        The protocol consists of two main components:
+        Aarce uses a unified hub-and-spoke architecture where all operations share the same liquidity pool:
       </p>
+
+      <div className="my-6 p-6 bg-gray-50 border border-gray-200 rounded-xl">
+        <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg text-xs overflow-x-auto whitespace-pre-wrap">
+{`User Operations
+    │
+    ├─── Supply/Borrow ──→ Spoke ──┐
+    │                              │
+    └─── Flash Loans ──────────────┼──→ Hub (Unified Liquidity)
+                                    │
+                                    └──→ All operations share same pool`}
+        </pre>
+      </div>
 
       <div className="my-8 p-6 bg-blue-50 border border-blue-200 rounded-xl">
         <h3 className="text-blue-900 font-semibold mb-3">Hub Contract</h3>
         <p className="text-blue-800 text-sm mb-3">
-          The Hub is the central liquidity pool that manages assets across all Spokes. It handles:
+          The Hub is the central liquidity pool that manages all assets. It handles:
         </p>
         <ul className="space-y-1 list-disc pl-5 text-blue-700 text-sm">
+          <li>Unified liquidity management for supply, borrow, and flash loans</li>
           <li>Asset management and interest rate calculations</li>
-          <li>Liquidity aggregation from all Spokes</li>
-          <li>Interest accrual and fee collection</li>
+          <li>Flash loan execution and fee collection</li>
+          <li>Interest accrual and debt tracking</li>
           <li>Asset configuration and risk parameters</li>
         </ul>
+        <p className="text-blue-800 text-xs mt-3 font-mono">
+          Address: 0xEA8365e81f8D9059eEB7353B4Bd6D78031D63423
+        </p>
       </div>
 
       <div className="my-8 p-6 bg-purple-50 border border-purple-200 rounded-xl">
         <h3 className="text-purple-900 font-semibold mb-3">Spoke Contract</h3>
         <p className="text-purple-800 text-sm mb-3">
-          The Spoke manages user positions and interactions for a specific market. It handles:
+          The Spoke manages user positions and routes operations to the Hub. It handles:
         </p>
         <ul className="space-y-1 list-disc pl-5 text-purple-700 text-sm">
           <li>User supply and borrow operations</li>
           <li>Collateral management and health factor tracking</li>
           <li>Reserve configuration and market parameters</li>
-          <li>Integration with the Hub for liquidity operations</li>
+          <li>Integration with the Hub for all liquidity operations</li>
         </ul>
+        <p className="text-purple-800 text-xs mt-3 font-mono">
+          Address: 0x3969D9c125D144a4653B52F2b6d3EC95BbAad1dD
+        </p>
       </div>
 
-      <h2 className="text-2xl mt-12 mb-4 text-gray-900">Liquidity Flow</h2>
+      <h2 className="text-2xl mt-12 mb-4 text-gray-900">Unified Liquidity</h2>
       <p className="text-gray-600 mb-4">
-        When you supply assets to Aarce:
+        All operations share the same liquidity pool in the Hub. When you supply assets:
       </p>
       <ol className="space-y-3 list-decimal pl-6 text-gray-600 mb-6">
         <li>Assets are deposited into the Spoke contract</li>
         <li>The Spoke transfers liquidity to the Hub, receiving shares in return</li>
         <li>Your supplied assets begin earning interest immediately</li>
+        <li>The liquidity becomes available for both borrowing and flash loans</li>
         <li>Interest accrues continuously and compounds over time</li>
       </ol>
 
@@ -147,6 +168,14 @@ const DOCS_CONTENT: Record<string, JSX.Element> = {
         <li>You receive the borrowed assets and start accruing interest on the debt</li>
         <li>Your health factor decreases as debt increases</li>
       </ol>
+
+      <div className="my-8 p-6 bg-green-50 border border-green-200 rounded-xl">
+        <h3 className="text-green-900 font-semibold mb-2">Key Benefit</h3>
+        <p className="text-green-800 text-sm">
+          Since supply, borrow, and flash loans all use the same Hub, liquidity you supply is immediately 
+          available for flash loans, and flash loan fees increase the protocol's total liquidity.
+        </p>
+      </div>
 
       <h2 className="text-2xl mt-12 mb-4 text-gray-900">Shares Model</h2>
       <p className="text-gray-600 mb-4">
@@ -474,26 +503,67 @@ Where:
   'Flash Loans': (
     <>
       <p className="text-xl text-gray-500 leading-relaxed mb-8">
-        Flash loans allow you to borrow assets without collateral, as long as you repay within the same transaction.
+        Flash loans allow you to borrow assets without collateral, as long as you repay within the same transaction. 
+        Flash loans are fully implemented and available on the unified Hub.
       </p>
 
-      <div className="my-8 p-6 bg-amber-50 border border-amber-200 rounded-xl">
-        <h3 className="text-amber-800 font-semibold mb-2">Status</h3>
-        <p className="text-amber-700 text-sm">
-          Flash loans are part of the Aave V4 architecture but are not yet fully implemented in the 
-          current Aarce testnet deployment. This feature will be available in future updates.
+      <div className="my-8 p-6 bg-green-50 border border-green-200 rounded-xl">
+        <h3 className="text-green-900 font-semibold mb-2">Status: Fully Implemented</h3>
+        <p className="text-green-800 text-sm">
+          Flash loans are available for USDC, EURC, and USDT with a 0.09% fee (9 basis points). 
+          The Hub address is: <code className="bg-green-100 px-1 rounded font-mono">0xEA8365e81f8D9059eEB7353B4Bd6D78031D63423</code>. 
+          Flash loans use the same liquidity pool as supply and borrow operations.
         </p>
       </div>
 
       <h2 className="text-2xl mt-12 mb-4 text-gray-900">How Flash Loans Work</h2>
       <p className="text-gray-600 mb-4">
-        When implemented, flash loans will work as follows:
+        Flash loans execute atomically within a single transaction:
       </p>
       <ol className="space-y-3 list-decimal pl-6 text-gray-600 mb-6">
         <li>Borrow any amount of a supported asset (no collateral required)</li>
-        <li>Execute your logic with the borrowed funds</li>
-        <li>Repay the borrowed amount plus a small fee within the same transaction</li>
-        <li>If repayment fails, the entire transaction reverts</li>
+        <li>Execute your logic with the borrowed funds (e.g., swaps, arbitrage)</li>
+        <li>Repay the borrowed amount plus a 0.09% fee within the same transaction</li>
+        <li>If repayment fails, the entire transaction reverts (atomic execution)</li>
+      </ol>
+
+      <h2 className="text-2xl mt-12 mb-4 text-gray-900">Fee Structure</h2>
+      <div className="my-6 p-5 bg-gray-50 border border-gray-200 rounded-xl">
+        <ul className="space-y-2 text-sm text-gray-600">
+          <li><strong>Fee Rate:</strong> 0.09% (9 basis points)</li>
+          <li><strong>Fee Calculation:</strong> Rounds up to match Hub's calculation</li>
+          <li><strong>Fee Recipient:</strong> Added to Hub liquidity as protocol profit</li>
+          <li><strong>Example:</strong> Flash loan of 1,000 USDC = 0.9 USDC fee (rounded up)</li>
+        </ul>
+      </div>
+
+      <h2 className="text-2xl mt-12 mb-4 text-gray-900">Using Flash Loans</h2>
+      <p className="text-gray-600 mb-4">
+        To execute a flash loan, you need a receiver contract that implements the <code className="bg-gray-100 px-1 rounded text-xs">IFlashLoanReceiver</code> interface:
+      </p>
+      <div className="my-6 p-5 bg-gray-50 border border-gray-200 rounded-xl">
+        <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg text-xs overflow-x-auto">
+{`interface IFlashLoanReceiver {
+  function executeOperation(
+    uint256 assetId,
+    uint256 amount,
+    uint256 fee,
+    bytes calldata params
+  ) external returns (bool);
+}`}
+        </pre>
+      </div>
+
+      <p className="text-gray-600 mb-4 mt-6">
+        The execution flow:
+      </p>
+      <ol className="space-y-2 list-decimal pl-6 text-gray-600 mb-6 text-sm">
+        <li>User transfers fee to receiver contract (as EOA)</li>
+        <li>User calls receiver's execute function</li>
+        <li>Receiver calls <code className="bg-gray-100 px-1 rounded text-xs">Hub.flashLoan()</code></li>
+        <li>Hub transfers tokens to receiver and calls <code className="bg-gray-100 px-1 rounded text-xs">executeOperation()</code></li>
+        <li>Receiver performs operations and repays loan + fee</li>
+        <li>Hub verifies repayment and updates liquidity</li>
       </ol>
 
       <h2 className="text-2xl mt-12 mb-4 text-gray-900">Use Cases</h2>
@@ -501,11 +571,34 @@ Where:
         Flash loans enable various DeFi strategies:
       </p>
       <ul className="space-y-2 list-disc pl-6 text-gray-600 mb-6">
-        <li>Arbitrage opportunities across different DEXs</li>
-        <li>Collateral swapping without intermediate steps</li>
-        <li>Liquidation of undercollateralized positions</li>
-        <li>Self-liquidation to avoid penalties</li>
+        <li><strong>Arbitrage:</strong> Exploit price differences across DEXs</li>
+        <li><strong>Collateral Swaps:</strong> Swap collateral without intermediate steps</li>
+        <li><strong>Debt Refinancing:</strong> Repay debt at better rates</li>
+        <li><strong>Liquidation:</strong> Liquidate undercollateralized positions</li>
+        <li><strong>Self-Liquidation:</strong> Avoid penalties by self-liquidating</li>
       </ul>
+
+      <h2 className="text-2xl mt-12 mb-4 text-gray-900">Example Receiver Contract</h2>
+      <p className="text-gray-600 mb-4">
+        A simple flash loan receiver is available for testing:
+      </p>
+      <div className="my-6 p-5 bg-gray-50 border border-gray-200 rounded-xl">
+        <p className="text-sm text-gray-600 mb-2">
+          <strong>Address:</strong> <code className="bg-gray-100 px-1 rounded font-mono">0x5aaCE9d8aF196EeACBe363a5e44c9736Fb738559</code>
+        </p>
+        <p className="text-xs text-gray-500">
+          This receiver accepts fee pre-transfer and repays the loan + fee. It can be used as a template 
+          for building custom flash loan receivers.
+        </p>
+      </div>
+
+      <div className="my-8 p-6 bg-blue-50 border border-blue-200 rounded-xl">
+        <h3 className="text-blue-900 font-semibold mb-2">Frontend Integration</h3>
+        <p className="text-blue-800 text-sm">
+          You can execute flash loans directly from the Flash Loans page. The interface shows available 
+          liquidity, calculates fees, and handles the execution flow including fee pre-transfer.
+        </p>
+      </div>
     </>
   ),
 
@@ -610,20 +703,28 @@ Where:
         <div className="p-5 bg-gray-50 border border-gray-200 rounded-xl">
           <h3 className="font-semibold text-gray-900 mb-2">Hub Contract</h3>
           <p className="text-sm text-gray-600 mb-3">
-            Manages global liquidity, interest accrual, and asset configuration. All Spokes connect to a single Hub.
+            Manages unified liquidity for supply, borrow, and flash loans. Handles interest accrual, 
+            asset configuration, and flash loan execution.
+          </p>
+          <p className="text-xs text-gray-500 font-mono mb-2">
+            Address: 0xEA8365e81f8D9059eEB7353B4Bd6D78031D63423
           </p>
           <p className="text-xs text-gray-500 font-mono">
-            Key functions: addAsset, getAsset, getSpokeOwed, setInterestRateData
+            Key functions: add, draw, flashLoan, getAssetLiquidity, getSpokeOwed
           </p>
         </div>
 
         <div className="p-5 bg-gray-50 border border-gray-200 rounded-xl">
           <h3 className="font-semibold text-gray-900 mb-2">Spoke Contract</h3>
           <p className="text-sm text-gray-600 mb-3">
-            Manages user positions, reserves, and market-specific operations. Each market has its own Spoke.
+            Manages user positions and routes supply/borrow operations to the Hub. Points to the unified 
+            Hub for all assets.
+          </p>
+          <p className="text-xs text-gray-500 font-mono mb-2">
+            Address: 0x3969D9c125D144a4653B52F2b6d3EC95BbAad1dD
           </p>
           <p className="text-xs text-gray-500 font-mono">
-            Key functions: supply, borrow, withdraw, repay, setUsingAsCollateral
+            Key functions: supply, borrow, withdraw, repay, getReserveSuppliedAssets
           </p>
         </div>
 
@@ -749,10 +850,34 @@ const reserve = await publicClient.readContract({
           </thead>
           <tbody className="divide-y divide-gray-200">
             <tr>
-              <td className="px-4 py-3 text-sm font-medium text-gray-900">Spoke</td>
-              <td className="px-4 py-3 text-sm font-mono text-gray-600">0x204B260E0E53e482f8504F37c752Ea63c2ee10A7</td>
+              <td className="px-4 py-3 text-sm font-medium text-gray-900">Hub</td>
+              <td className="px-4 py-3 text-sm font-mono text-gray-600">0xEA8365e81f8D9059eEB7353B4Bd6D78031D63423</td>
               <td className="px-4 py-3">
-                <a href="https://testnet.arcscan.app/address/0x204B260E0E53e482f8504F37c752Ea63c2ee10A7" 
+                <a href="https://testnet.arcscan.app/address/0xEA8365e81f8D9059eEB7353B4Bd6D78031D63423" 
+                   target="_blank" 
+                   rel="noopener noreferrer"
+                   className="text-brand-600 hover:text-brand-700 text-sm">
+                  View
+                </a>
+              </td>
+            </tr>
+            <tr>
+              <td className="px-4 py-3 text-sm font-medium text-gray-900">Spoke</td>
+              <td className="px-4 py-3 text-sm font-mono text-gray-600">0x3969D9c125D144a4653B52F2b6d3EC95BbAad1dD</td>
+              <td className="px-4 py-3">
+                <a href="https://testnet.arcscan.app/address/0x3969D9c125D144a4653B52F2b6d3EC95BbAad1dD" 
+                   target="_blank" 
+                   rel="noopener noreferrer"
+                   className="text-brand-600 hover:text-brand-700 text-sm">
+                  View
+                </a>
+              </td>
+            </tr>
+            <tr>
+              <td className="px-4 py-3 text-sm font-medium text-gray-900">Simple Flash Loan Receiver</td>
+              <td className="px-4 py-3 text-sm font-mono text-gray-600">0x5aaCE9d8aF196EeACBe363a5e44c9736Fb738559</td>
+              <td className="px-4 py-3">
+                <a href="https://testnet.arcscan.app/address/0x5aaCE9d8aF196EeACBe363a5e44c9736Fb738559" 
                    target="_blank" 
                    rel="noopener noreferrer"
                    className="text-brand-600 hover:text-brand-700 text-sm">
@@ -764,11 +889,11 @@ const reserve = await publicClient.readContract({
         </table>
       </div>
 
-      <div className="my-8 p-6 bg-amber-50 border border-amber-200 rounded-xl">
-        <h3 className="text-amber-800 font-semibold mb-2">Note</h3>
-        <p className="text-amber-700 text-sm">
-          Hub and other contract addresses are retrieved dynamically from the Spoke contract. 
-          Use the <code className="bg-amber-100 px-1 rounded">getReserve</code> function to get the Hub address for each asset.
+      <div className="my-8 p-6 bg-blue-50 border border-blue-200 rounded-xl">
+        <h3 className="text-blue-900 font-semibold mb-2">Unified Architecture</h3>
+        <p className="text-blue-800 text-sm">
+          The Spoke points to the unified Hub for all assets. Supply, borrow, and flash loan operations 
+          all use the same Hub contract, ensuring consistent liquidity across all features.
         </p>
       </div>
 

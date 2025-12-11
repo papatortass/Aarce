@@ -14,6 +14,7 @@ import {SharesMath} from 'src/hub/libraries/SharesMath.sol';
 import {Premium} from 'src/hub/libraries/Premium.sol';
 import {IBasicInterestRateStrategy} from 'src/hub/interfaces/IBasicInterestRateStrategy.sol';
 import {IHubBase, IHub} from 'src/hub/interfaces/IHub.sol';
+import {IFlashLoanReceiver} from 'src/hub/interfaces/IFlashLoanReceiver.sol';
 
 /// @title Hub
 /// @author Aave Labs
@@ -39,6 +40,9 @@ contract Hub is IHub, AccessManaged {
 
   /// @inheritdoc IHub
   uint24 public constant MAX_RISK_PREMIUM_THRESHOLD = type(uint24).max;
+
+  /// @notice Flash loan fee in basis points (0.09% = 9 bps, same as Aave V3)
+  uint256 public constant FLASH_LOAN_FEE_BPS = 9;
 
   /// @dev Number of assets listed in the Hub.
   uint256 internal _assetCount;
@@ -455,6 +459,61 @@ contract Hub is IHub, AccessManaged {
     IERC20(asset.underlying).safeTransferFrom(msg.sender, address(this), amount);
 
     emit Reclaim(assetId, msg.sender, amount);
+  }
+
+  /// @inheritdoc IHubBase
+  function flashLoan(
+    uint256 assetId,
+    address receiver,
+    uint256 amount,
+    bytes calldata params
+  ) external {
+    require(assetId < _assetCount, AssetNotListed());
+    require(receiver != address(0), InvalidAddress());
+    require(amount > 0, InvalidAmount());
+
+    Asset storage asset = _assets[assetId];
+    asset.accrue();
+
+    uint256 liquidity = asset.liquidity;
+    require(amount <= liquidity, InsufficientLiquidity(liquidity));
+
+    // Calculate flash loan fee (0.09% = 9 bps)
+    uint256 fee = amount.percentMulUp(FLASH_LOAN_FEE_BPS);
+    uint256 totalRepayment = amount + fee;
+
+    // Store initial balance
+    uint256 initialBalance = IERC20(asset.underlying).balanceOf(address(this));
+
+    // Reduce liquidity by the flash loan amount
+    asset.liquidity = (liquidity - amount).toUint120();
+
+    // Transfer flash loan amount to receiver
+    IERC20(asset.underlying).safeTransfer(receiver, amount);
+
+    // Call executeOperation on receiver
+    require(
+      IFlashLoanReceiver(receiver).executeOperation(assetId, amount, fee, params),
+      'FlashLoan: executeOperation failed'
+    );
+
+    // Check repayment: balance should be at least initialBalance + fee
+    uint256 finalBalance = IERC20(asset.underlying).balanceOf(address(this));
+    require(
+      finalBalance >= initialBalance + fee,
+      InsufficientTransferred(totalRepayment.uncheckedSub(finalBalance - initialBalance))
+    );
+
+    // Update liquidity: restore the amount and add the fee
+    // The repayment (amount + fee) was received, so we need to:
+    // - Restore the amount that was sent (liquidity was reduced at line 489)
+    // - Add the fee as profit
+    // Since asset.liquidity was already reduced by 'amount' at line 489,
+    // we need to add back both the amount and the fee
+    asset.liquidity = (asset.liquidity + amount + fee).toUint120();
+    asset.updateDrawnRate(assetId);
+
+    emit FlashLoan(assetId, receiver, amount, fee);
   }
 
   /// @inheritdoc IHub

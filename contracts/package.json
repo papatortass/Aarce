@@ -24,5 +24,8 @@
   },
   "lint-staged": {
     "*.{sol,md,py,ts}": "prettier . --write"
+  },
+  "dependencies": {
+    "@synthra-swap/swap-router-contracts": "^1.1.0"
   }
 }

@@ -5,6 +5,7 @@ import Landing from './pages/Landing';
 import { AppLayout } from './pages/AppLayout';
 import Dashboard from './pages/Dashboard';
 import Markets from './pages/Markets';
+import FlashLoans from './pages/FlashLoans';
 import Docs from './pages/Docs';
 
 function App() {
@@ -21,6 +22,7 @@ function App() {
         }>
           <Route index element={<Dashboard />} />
           <Route path="markets" element={<Markets />} />
+          <Route path="flash-loans" element={<FlashLoans />} />
         </Route>
 
         {/* Documentation Route */}
