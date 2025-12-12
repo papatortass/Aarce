@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, AlertCircle, ArrowRight } from 'lucide-react';
-import { Button, Input, Badge } from './UI';
+import { Button, Input, Badge, LoadingDots } from './UI';
 import { Asset, ModalTab } from '../types';
 import { useWallet } from '../contexts/WalletContext';
 import { getUserAssetBalance, getUserHealthFactor, calculateSimulatedHealthFactor, supplyAsset, getAvailableBorrowPower, borrowAsset, getUserSuppliedAsset, getUserBorrowedAsset, withdrawAsset, repayAsset, getMaxWithdrawableAsset, fetchAssetData } from '../services/contracts';
@@ -387,7 +387,7 @@ export const AssetModal: React.FC<AssetModalProps> = ({ isOpen, onClose, asset, 
             <div className="flex justify-between text-sm text-gray-500">
               <span>Amount</span>
               {isLoadingUserData ? (
-                <span className="text-gray-400">Loading...</span>
+                <LoadingDots className="text-gray-400" size="sm" />
               ) : (
                 <span className="cursor-pointer hover:text-brand-600" onClick={() => setAmount(maxAmount.toFixed(6))}>
                   Max: {maxAmount.toFixed(6)} {asset.symbol}
@@ -437,7 +437,7 @@ export const AssetModal: React.FC<AssetModalProps> = ({ isOpen, onClose, asset, 
                 <span className="text-gray-500">Health Factor</span>
                 <div className="flex items-center gap-2">
                   {isLoadingUserData ? (
-                    <span className="text-gray-400 text-xs">Loading...</span>
+                    <LoadingDots className="text-gray-400" size="sm" />
                   ) : (
                     <>
                       <span className="font-medium text-gray-900">

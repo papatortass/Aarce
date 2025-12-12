@@ -1,5 +1,5 @@
 import React, { useContext, useEffect, useState } from 'react';
-import { Card, TableHeader, TableRow, TableCell, Button } from '../components/UI';
+import { Card, TableHeader, TableRow, TableCell, Button, LoadingDots } from '../components/UI';
 import { MOCK_ASSETS } from '../constants';
 import { ModalContext } from './AppLayout';
 import { fetchAssetData, type AssetData } from '../services/contracts';
@@ -14,28 +14,55 @@ export default function Markets() {
   useEffect(() => {
     const loadData = async () => {
       setIsLoading(true);
-      try {
-        const dataMap = new Map<string, AssetData>();
+      const dataMap = new Map<string, AssetData>();
+      
+      // Fetch data for all assets with retry logic
+      for (const asset of MOCK_ASSETS) {
+        let data: AssetData | null = null;
+        let attempts = 0;
+        const maxAttempts = 3;
         
-        // Fetch data for all assets
-        for (const asset of MOCK_ASSETS) {
-          const data = await fetchAssetData(asset.symbol);
-          if (data) {
-            dataMap.set(asset.symbol, data);
+        // Retry up to 3 times for each asset
+        while (attempts < maxAttempts && !data) {
+          try {
+            data = await fetchAssetData(asset.symbol);
+            if (data) {
+              dataMap.set(asset.symbol, data);
+              break; // Success, move to next asset
+            } else {
+              // fetchAssetData returned null - might be a temporary failure
+              attempts++;
+              if (attempts < maxAttempts) {
+                console.log(`Retrying ${asset.symbol} (attempt ${attempts + 1}/${maxAttempts})...`);
+                // Wait before retry with exponential backoff
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+              }
+            }
+          } catch (error: any) {
+            attempts++;
+            if (attempts < maxAttempts) {
+              console.log(`Retrying ${asset.symbol} after error (attempt ${attempts + 1}/${maxAttempts}):`, error?.message || error);
+              // Wait before retry with exponential backoff
+              await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+            } else {
+              console.error(`Failed to fetch data for ${asset.symbol} after ${maxAttempts} attempts:`, error?.message || error);
+            }
           }
         }
         
-        setAssetsData(dataMap);
-      } catch (error) {
-        console.error('Failed to fetch asset data:', error);
-      } finally {
-        setIsLoading(false);
+        // If still no data after retries, log it but continue
+        if (!data) {
+          console.warn(`⚠️ No data available for ${asset.symbol} after ${maxAttempts} attempts - reserve may not be configured or RPC is rate limited`);
+        }
       }
+      
+      setAssetsData(dataMap);
+      setIsLoading(false);
     };
 
     loadData();
-    // Refresh every 30 seconds
-    const interval = setInterval(loadData, 30000);
+    // Refresh every 60 seconds (reduced frequency to avoid rate limits)
+    const interval = setInterval(loadData, 60000);
     return () => clearInterval(interval);
   }, []);
 
@@ -97,7 +124,8 @@ export default function Markets() {
             <tbody>
               {assets.map((asset) => {
                 const data = assetsData.get(asset.symbol);
-                const hasData = data && (data.liquidity > 0 || data.collateralFactor > 0);
+                // Consider data valid if we have any meaningful data (even if liquidity is 0, we might have APY or collateral factor)
+                const hasData = data !== undefined && data !== null;
                 
                 return (
                   <TableRow key={asset.id}>
@@ -114,36 +142,36 @@ export default function Markets() {
                         </div>
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="text-right">
                       {isLoading ? (
-                        <span className="text-gray-400">Loading...</span>
+                        <LoadingDots className="text-gray-400" />
                       ) : hasData ? (
                         <span className="font-medium text-green-600">{asset.supplyApy.toFixed(2)}%</span>
                       ) : (
                         <span className="text-gray-400">-</span>
                       )}
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="text-right">
                       {isLoading ? (
-                        <span className="text-gray-400">Loading...</span>
+                        <LoadingDots className="text-gray-400" />
                       ) : hasData ? (
                         <span className="font-medium text-orange-600">{asset.borrowApy.toFixed(2)}%</span>
                       ) : (
                         <span className="text-gray-400">-</span>
                       )}
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="text-right">
                       {isLoading ? (
-                        <span className="text-gray-400">Loading...</span>
+                        <LoadingDots className="text-gray-400" />
                       ) : hasData ? (
                         <span>${asset.liquidity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
                       ) : (
                         <span className="text-gray-400">-</span>
                       )}
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="text-right">
                       {isLoading ? (
-                        <span className="text-gray-400">Loading...</span>
+                        <LoadingDots className="text-gray-400" />
                       ) : hasData ? (
                         <span className="inline-flex items-center px-2 py-1 rounded bg-gray-100 text-xs font-medium text-gray-600">
                           {(asset.collateralFactor * 100).toFixed(0)}%

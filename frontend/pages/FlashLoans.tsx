@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, TableHeader, TableRow, TableCell, Input } from '../components/UI';
+import { Card, Button, TableHeader, TableRow, TableCell, Input, LoadingDots } from '../components/UI';
 import { MOCK_ASSETS } from '../constants';
 import { CONTRACT_ADDRESSES } from '../config/contracts';
 import { 
@@ -10,8 +10,7 @@ import {
   type AssetData,
   fetchAssetData
 } from '../services/contracts';
-import { createPublicClient, http, type Address } from 'viem';
-import { ARC_TESTNET } from '../services/contracts';
+import { type Address } from 'viem';
 import { Asset } from '../types';
 import { Zap, AlertCircle, Info } from 'lucide-react';
 import { useWallet } from '../contexts/WalletContext';
@@ -31,7 +30,8 @@ export default function FlashLoans() {
 
   useEffect(() => {
     loadFlashLoanData();
-    const interval = setInterval(loadFlashLoanData, 30000);
+    // Refresh every 60 seconds (reduced frequency to avoid rate limits)
+    const interval = setInterval(loadFlashLoanData, 60000);
     return () => clearInterval(interval);
   }, []);
 
@@ -43,30 +43,70 @@ export default function FlashLoans() {
 
   const loadFlashLoanData = async () => {
     setIsLoading(true);
-    try {
-      const dataMap = new Map<string, AssetData>();
-      const liquidityMap = new Map<string, number>();
+    const dataMap = new Map<string, AssetData>();
+    const liquidityMap = new Map<string, number>();
+    
+    // Fetch data for all assets with retry logic
+    for (const asset of MOCK_ASSETS) {
+      // Fetch market data with retries
+      let data: AssetData | null = null;
+      let dataAttempts = 0;
+      const maxDataAttempts = 3;
       
-      for (const asset of MOCK_ASSETS) {
-        // Fetch market data
-        const data = await fetchAssetData(asset.symbol);
-        if (data) {
-          dataMap.set(asset.symbol, data);
+      while (dataAttempts < maxDataAttempts && !data) {
+        try {
+          data = await fetchAssetData(asset.symbol);
+          if (data) {
+            dataMap.set(asset.symbol, data);
+            break;
+          } else {
+            // fetchAssetData returned null - retry
+            dataAttempts++;
+            if (dataAttempts < maxDataAttempts) {
+              console.log(`Retrying market data for ${asset.symbol} (attempt ${dataAttempts + 1}/${maxDataAttempts})...`);
+              await new Promise(resolve => setTimeout(resolve, 1000 * dataAttempts));
+            }
+          }
+        } catch (error: any) {
+          dataAttempts++;
+          if (dataAttempts < maxDataAttempts) {
+            console.log(`Retrying market data for ${asset.symbol} after error (attempt ${dataAttempts + 1}/${maxDataAttempts}):`, error?.message || error);
+            await new Promise(resolve => setTimeout(resolve, 1000 * dataAttempts));
+          } else {
+            console.error(`Failed to fetch market data for ${asset.symbol} after ${maxDataAttempts} attempts:`, error?.message || error);
+          }
         }
-        
-        // Fetch flash loan liquidity from the new Hub (Spoke now points to it)
-        // Use HUB_NEW directly since the new Spoke points to it
-        const liquidity = await getFlashLoanLiquidity(asset.symbol, CONTRACT_ADDRESSES.HUB_NEW);
-        liquidityMap.set(asset.symbol, liquidity);
       }
       
-      setAssetsData(dataMap);
-      setFlashLoanLiquidity(liquidityMap);
-    } catch (error) {
-      console.error('Failed to fetch flash loan data:', error);
-    } finally {
-      setIsLoading(false);
+      if (!data) {
+        console.warn(`⚠️ No market data available for ${asset.symbol} after ${maxDataAttempts} attempts`);
+      }
+      
+      // Fetch flash loan liquidity with retries
+      let liquidity = 0;
+      let liquidityAttempts = 0;
+      const maxLiquidityAttempts = 3;
+      
+      while (liquidityAttempts < maxLiquidityAttempts) {
+        try {
+          liquidity = await getFlashLoanLiquidity(asset.symbol, CONTRACT_ADDRESSES.HUB_NEW);
+          liquidityMap.set(asset.symbol, liquidity);
+          break;
+        } catch (error: any) {
+          liquidityAttempts++;
+          if (liquidityAttempts < maxLiquidityAttempts) {
+            await new Promise(resolve => setTimeout(resolve, 1000 * liquidityAttempts));
+          } else {
+            console.error(`Failed to fetch flash loan liquidity for ${asset.symbol} after ${maxLiquidityAttempts} attempts:`, error?.message || error);
+            liquidityMap.set(asset.symbol, 0); // Set to 0 on failure
+          }
+        }
+      }
     }
+    
+    setAssetsData(dataMap);
+    setFlashLoanLiquidity(liquidityMap);
+    setIsLoading(false);
   };
 
   const assets: Asset[] = MOCK_ASSETS.map(asset => {
@@ -342,11 +382,11 @@ export default function FlashLoans() {
                             </div>
                           </div>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="text-right">
                           {isLoading ? (
-                            <span className="text-gray-400">Loading...</span>
+                            <LoadingDots className="text-gray-400" />
                           ) : hasLiquidity ? (
-                            <div>
+                            <div className="text-right">
                               <span className="font-medium text-gray-900">
                                 {liquidity.toLocaleString(undefined, { maximumFractionDigits: 2 })} {asset.symbol}
                               </span>
@@ -356,7 +396,7 @@ export default function FlashLoans() {
                             <span className="text-gray-400">No liquidity</span>
                           )}
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="text-right">
                           <span className="inline-flex items-center px-2 py-1 rounded bg-indigo-50 text-xs font-medium text-indigo-600">
                             {((feeBps / 10000) * 100).toFixed(2)}%
                           </span>

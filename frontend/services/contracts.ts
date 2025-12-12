@@ -1,9 +1,9 @@
-import { createPublicClient, createWalletClient, http, custom, type Address, type Chain } from 'viem';
+import { createPublicClient, createWalletClient, http, webSocket, custom, type Address, type Chain, type PublicClient } from 'viem';
 import { formatUnits, parseUnits } from 'viem';
 import { CONTRACT_ADDRESSES } from '../config/contracts';
 
-// Arc Testnet configuration
-const ARC_TESTNET: Chain = {
+// Export ARC_TESTNET for use in other files
+export const ARC_TESTNET: Chain = {
   id: 5042002,
   name: 'Arc Testnet',
   nativeCurrency: {
@@ -14,6 +14,7 @@ const ARC_TESTNET: Chain = {
   rpcUrls: {
     default: {
       http: ['https://rpc.testnet.arc.network'],
+      webSocket: ['wss://rpc.testnet.arc.network'],
     },
   },
   blockExplorers: {
@@ -24,6 +25,110 @@ const ARC_TESTNET: Chain = {
   },
   testnet: true,
 };
+
+// Shared public client using WebSocket for better performance and to avoid rate limits
+// This creates a single persistent connection that can be reused across all functions
+let sharedPublicClient: PublicClient | null = null;
+
+// Request throttling to stay under rate limits (20 requests/second)
+let requestQueue: Array<{ fn: () => Promise<any>; resolve: (value: any) => void; reject: (error: any) => void }> = [];
+let isProcessingQueue = false;
+let lastRequestTime = 0;
+const MIN_REQUEST_INTERVAL = 60; // 60ms = ~16 requests/second (under 20/sec limit)
+const MAX_QUEUE_SIZE = 100;
+
+async function processRequestQueue() {
+  if (isProcessingQueue || requestQueue.length === 0) {
+    return;
+  }
+  
+  isProcessingQueue = true;
+  
+  while (requestQueue.length > 0) {
+    const now = Date.now();
+    const timeSinceLastRequest = now - lastRequestTime;
+    
+    // Throttle requests to stay under rate limit
+    if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
+      await new Promise(resolve => setTimeout(resolve, MIN_REQUEST_INTERVAL - timeSinceLastRequest));
+    }
+    
+    const item = requestQueue.shift();
+    if (item) {
+      lastRequestTime = Date.now();
+      try {
+        const result = await item.fn();
+        item.resolve(result);
+      } catch (error) {
+        item.reject(error);
+      }
+    }
+  }
+  
+  isProcessingQueue = false;
+}
+
+function throttledRequest<T>(requestFn: () => Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    if (requestQueue.length >= MAX_QUEUE_SIZE) {
+      reject(new Error('Request queue is full - too many concurrent requests'));
+      return;
+    }
+    
+    requestQueue.push({
+      fn: requestFn,
+      resolve,
+      reject,
+    });
+    
+    processRequestQueue();
+  });
+}
+
+// Wrapper for readContract that respects rate limits
+export async function readContractWithThrottle<T>(params: any): Promise<T> {
+  const publicClient = getPublicClient();
+  return throttledRequest(() => publicClient.readContract(params) as Promise<T>);
+}
+
+// Wrapper for getBalance that respects rate limits
+export async function getBalanceWithThrottle(address: Address): Promise<bigint> {
+  const publicClient = getPublicClient();
+  return throttledRequest(() => publicClient.getBalance({ address }));
+}
+
+export function getPublicClient(): PublicClient {
+  if (!sharedPublicClient) {
+    // Try to use WebSocket, fallback to HTTP if WebSocket fails
+    try {
+      sharedPublicClient = createPublicClient({
+        chain: ARC_TESTNET,
+        transport: webSocket('wss://rpc.testnet.arc.network', {
+          reconnect: true,
+          retryCount: 5,
+          retryDelay: 1000,
+        }),
+      });
+      console.log('✅ Connected to Arc Testnet via WebSocket');
+    } catch (error) {
+      console.warn('WebSocket connection failed, falling back to HTTP:', error);
+      sharedPublicClient = createPublicClient({
+        chain: ARC_TESTNET,
+        transport: http(),
+      });
+    }
+  }
+  return sharedPublicClient;
+}
+
+
+// Cache for reserve IDs to avoid repeated lookups
+const reserveIdCache = new Map<string, bigint | null>();
+const reserveIdCacheTimestamp = new Map<string, number>();
+const CACHE_TTL = 60000; // 1 minute cache
+
+// Cache for reserve data to avoid repeated contract calls
+const reserveDataCache = new Map<string, { reserveId: bigint; reserve: any; timestamp: number }>();
 
 // Contract ABIs (simplified - only what we need)
 const SPOKE_ABI = [
@@ -422,16 +527,13 @@ export async function fetchUSDCData(): Promise<USDCData> {
     };
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
     // 0. Check if any reserves exist
     let reserveCount: bigint;
     try {
-      reserveCount = await publicClient.readContract({
+      reserveCount = await readContractWithThrottle({
         address: SPOKE_ADDRESS,
         abi: SPOKE_ABI,
         functionName: 'getReserveCount',
@@ -465,7 +567,7 @@ export async function fetchUSDCData(): Promise<USDCData> {
     // Check if the expected reserve ID exists
     if (USDC_RESERVE_ID < reserveCount) {
       try {
-        reserve = await publicClient.readContract({
+        reserve = await readContractWithThrottle({
           address: SPOKE_ADDRESS,
           abi: SPOKE_ABI,
           functionName: 'getReserve',
@@ -485,7 +587,7 @@ export async function fetchUSDCData(): Promise<USDCData> {
     if (usdcReserveId === null) {
       for (let i = 0n; i < reserveCount; i++) {
         try {
-          const testReserve = await publicClient.readContract({
+          const testReserve = await readContractWithThrottle({
             address: SPOKE_ADDRESS,
             abi: SPOKE_ABI,
             functionName: 'getReserve',
@@ -533,7 +635,7 @@ export async function fetchUSDCData(): Promise<USDCData> {
     }
 
     // 2. Get liquidity (supplied assets)
-    const suppliedAssets = await publicClient.readContract({
+    const suppliedAssets = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getReserveSuppliedAssets',
@@ -544,7 +646,7 @@ export async function fetchUSDCData(): Promise<USDCData> {
     let drawnDebt = 0n;
     let premiumDebt = 0n;
     try {
-      [drawnDebt, premiumDebt] = await publicClient.readContract({
+      [drawnDebt, premiumDebt] = await readContractWithThrottle({
         address: hubAddress,
         abi: HUB_ABI,
         functionName: 'getSpokeOwed',
@@ -560,7 +662,7 @@ export async function fetchUSDCData(): Promise<USDCData> {
     // 4. Get asset config (for liquidity fee and IR strategy)
     let assetConfig;
     try {
-      assetConfig = await publicClient.readContract({
+      assetConfig = await readContractWithThrottle({
         address: hubAddress,
         abi: HUB_ABI,
         functionName: 'getAssetConfig',
@@ -585,12 +687,12 @@ export async function fetchUSDCData(): Promise<USDCData> {
 
     let borrowRateRay = 0n;
     try {
-      borrowRateRay = await publicClient.readContract({
-        address: assetConfig.irStrategy as Address,
-        abi: IR_STRATEGY_ABI,
-        functionName: 'calculateInterestRate',
-        args: [assetId, liquidity, totalDebt, deficit, swept],
-      });
+        borrowRateRay = await readContractWithThrottle({
+          address: assetConfig.irStrategy as Address,
+          abi: IR_STRATEGY_ABI,
+          functionName: 'calculateInterestRate',
+          args: [assetId, liquidity, totalDebt, deficit, swept],
+        });
     } catch (error: any) {
       console.warn('Error calculating interest rate, using base rate:', error?.message);
       // If calculateInterestRate fails, try to get base rate from interest rate strategy
@@ -599,7 +701,7 @@ export async function fetchUSDCData(): Promise<USDCData> {
     }
 
     // 6. Get collateral factor
-    const dynamicConfig = await publicClient.readContract({
+    const dynamicConfig = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getDynamicReserveConfig',
@@ -705,20 +807,17 @@ const ERC20_ABI = [
  * Get user's USDC balance from their wallet
  */
 export async function getUserUSDCBalance(userAddress: Address): Promise<number> {
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
-    const balance = await publicClient.readContract({
+    const balance = await readContractWithThrottle({
       address: USDC_ADDRESS,
       abi: ERC20_ABI,
       functionName: 'balanceOf',
       args: [userAddress],
     });
 
-    const decimals = await publicClient.readContract({
+    const decimals = await readContractWithThrottle({
       address: USDC_ADDRESS,
       abi: ERC20_ABI,
       functionName: 'decimals',
@@ -739,13 +838,10 @@ export async function getUserHealthFactor(userAddress: Address): Promise<number 
     return null;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
-    const accountData = await publicClient.readContract({
+    const accountData = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getUserAccountData',
@@ -775,10 +871,7 @@ export async function getUserSuppliedUSDC(userAddress: Address): Promise<number>
     return 0;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
     const usdcReserveId = await findUSDCReserveId();
@@ -786,7 +879,7 @@ export async function getUserSuppliedUSDC(userAddress: Address): Promise<number>
       return 0;
     }
 
-    const suppliedAssets = await publicClient.readContract({
+    const suppliedAssets = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getUserSuppliedAssets',
@@ -810,10 +903,7 @@ export async function getMaxWithdrawableUSDC(userAddress: Address): Promise<numb
     return 0;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
     const usdcReserveId = await findUSDCReserveId();
@@ -825,7 +915,7 @@ export async function getMaxWithdrawableUSDC(userAddress: Address): Promise<numb
     const suppliedAmount = await getUserSuppliedUSDC(userAddress);
     
     // If no debt, can withdraw all
-    const accountData = await publicClient.readContract({
+    const accountData = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getUserAccountData',
@@ -854,7 +944,7 @@ export async function getMaxWithdrawableUSDC(userAddress: Address): Promise<numb
     const maxWithdrawableValue = Math.max(0, totalCollateralValue - minCollateralNeeded);
 
     // Check if USDC is being used as collateral
-    const [isUsingAsCollateral] = await publicClient.readContract({
+    const [isUsingAsCollateral] = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getUserReserveStatus',
@@ -872,14 +962,14 @@ export async function getMaxWithdrawableUSDC(userAddress: Address): Promise<numb
     // Otherwise, we'd need to calculate the USDC portion
     
     // Get USDC reserve config to get collateral factor
-    const reserve = await publicClient.readContract({
+    const reserve = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getReserve',
       args: [usdcReserveId],
     });
 
-    const dynamicConfig = await publicClient.readContract({
+    const dynamicConfig = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getDynamicReserveConfig',
@@ -921,10 +1011,7 @@ export async function getUserBorrowedUSDC(userAddress: Address): Promise<number>
     return 0;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
     const usdcReserveId = await findUSDCReserveId();
@@ -933,7 +1020,7 @@ export async function getUserBorrowedUSDC(userAddress: Address): Promise<number>
     }
 
     // Use getUserTotalDebt which returns the total debt (drawn + premium)
-    const totalDebt = await publicClient.readContract({
+    const totalDebt = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getUserTotalDebt',
@@ -972,14 +1059,11 @@ export async function getUserPortfolioData(userAddress: Address): Promise<UserPo
     };
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
-    // Get account data for health factor
-    const accountData = await publicClient.readContract({
+    // Get account data - this is the authoritative source from the contract
+    const accountData = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getUserAccountData',
@@ -991,7 +1075,57 @@ export async function getUserPortfolioData(userAddress: Address): Promise<UserPo
       ? null
       : parseFloat(formatUnits(accountData.healthFactor, 18));
 
-    // Get supplied and borrowed amounts for all assets
+    // Use contract's authoritative values (in 26 decimals for USD)
+    // These values are calculated by the contract and are always accurate
+    const totalCollateralValue = parseFloat(formatUnits(accountData.totalCollateralValue, 26));
+    const totalDebtValue = parseFloat(formatUnits(accountData.totalDebtValue, 26));
+    const avgCollateralFactor = parseFloat(formatUnits(accountData.avgCollateralFactor, 18));
+
+    // Validate values are reasonable (not NaN or Infinity)
+    if (!isFinite(totalCollateralValue) || !isFinite(totalDebtValue) || totalCollateralValue < 0 || totalDebtValue < 0) {
+      console.error('Invalid portfolio values from contract:', {
+        totalCollateralValue,
+        totalDebtValue,
+        rawCollateral: accountData.totalCollateralValue.toString(),
+        rawDebt: accountData.totalDebtValue.toString(),
+        healthFactor,
+      });
+      // Return safe defaults
+      return {
+        netWorth: 0,
+        totalSupplied: 0,
+        totalBorrowed: 0,
+        availableToBorrow: 0,
+        healthFactor: null,
+        netApy: 0,
+      };
+    }
+
+    // Net worth = collateral - debt (using contract's authoritative values)
+    // Note: Negative net worth is valid if user is underwater (debt > collateral)
+    // However, if health factor is good (> 1.0), net worth should be positive
+    let netWorth = totalCollateralValue - totalDebtValue;
+    
+    // Safety check: If health factor is good but net worth is negative, there's likely a calculation error
+    // This can happen if values are fetched inconsistently or there's a race condition
+    if (netWorth < 0 && healthFactor !== null && healthFactor > 1.0) {
+      console.warn('Inconsistent portfolio data detected:', {
+        totalCollateralValue,
+        totalDebtValue,
+        netWorth,
+        healthFactor,
+        avgCollateralFactor,
+        note: 'Health factor > 1.0 but net worth is negative - possible race condition',
+      });
+      // Recalculate net worth more conservatively - use 0 if health factor suggests it should be positive
+      // But still allow negative if health factor is low (user is actually underwater)
+      if (healthFactor > 1.5) {
+        // Health factor is very good, net worth should definitely be positive
+        netWorth = Math.max(0, netWorth);
+      }
+    }
+
+    // Get supplied and borrowed amounts for all assets (for display purposes)
     const [suppliedUSDC, borrowedUSDC] = await Promise.all([
       getUserSuppliedAsset('USDC', userAddress),
       getUserBorrowedAsset('USDC', userAddress),
@@ -1007,14 +1141,14 @@ export async function getUserPortfolioData(userAddress: Address): Promise<UserPo
       getUserBorrowedAsset('USDT', userAddress),
     ]);
 
-    // Get asset prices and collateral factors
+    // Get asset prices and collateral factors (for APY calculation)
     const [usdcData, eurcData, usdtData] = await Promise.all([
       fetchAssetData('USDC'),
       fetchAssetData('EURC'),
       fetchAssetData('USDT'),
     ]);
 
-    // Calculate total supplied and borrowed in USD
+    // Calculate total supplied and borrowed in USD (for display, but use contract values as primary)
     const totalSuppliedUSD = 
       (suppliedUSDC * (usdcData?.price || 1.00)) +
       (suppliedEURC * (eurcData?.price || 1.08)) +
@@ -1024,39 +1158,11 @@ export async function getUserPortfolioData(userAddress: Address): Promise<UserPo
       (borrowedUSDC * (usdcData?.price || 1.00)) +
       (borrowedEURC * (eurcData?.price || 1.08)) +
       (borrowedUSDT * (usdtData?.price || 1.00));
-
-    // Calculate weighted average collateral factor
-    let totalCollateralWeighted = 0;
-    let totalCollateralValue = 0;
     
-    if (suppliedUSDC > 0 && usdcData) {
-      const usdcValue = suppliedUSDC * (usdcData.price || 1.00);
-      totalCollateralValue += usdcValue;
-      totalCollateralWeighted += usdcValue * usdcData.collateralFactor;
-    }
-    
-    if (suppliedEURC > 0 && eurcData) {
-      const eurcValue = suppliedEURC * (eurcData.price || 1.08);
-      totalCollateralValue += eurcValue;
-      totalCollateralWeighted += eurcValue * eurcData.collateralFactor;
-    }
-    
-    if (suppliedUSDT > 0 && usdtData) {
-      const usdtValue = suppliedUSDT * (usdtData.price || 1.00);
-      totalCollateralValue += usdtValue;
-      totalCollateralWeighted += usdtValue * usdtData.collateralFactor;
-    }
-    
-    const avgCollateralFactor = totalCollateralValue > 0 
-      ? totalCollateralWeighted / totalCollateralValue 
-      : 0;
-
-    // Net worth = collateral - debt
-    const netWorth = totalCollateralValue - totalBorrowedUSD;
-    
-    // Available to borrow = (collateral * collateralFactor) - debt
+    // Available to borrow = (collateral * avgCollateralFactor) - debt
+    // Use contract's authoritative values
     const maxBorrowValue = totalCollateralValue * avgCollateralFactor;
-    const availableToBorrow = Math.max(0, maxBorrowValue - totalBorrowedUSD);
+    const availableToBorrow = Math.max(0, maxBorrowValue - totalDebtValue);
 
     // Calculate net APY (weighted average across all assets)
     let netApy = 0;
@@ -1088,9 +1194,12 @@ export async function getUserPortfolioData(userAddress: Address): Promise<UserPo
     netApy = netPosition > 0 ? (netYield / netPosition) * 100 : 0;
 
     return {
-      netWorth,
-      totalSupplied: totalSuppliedUSD,
-      totalBorrowed: totalBorrowedUSD,
+      // Use contract's authoritative values for net worth
+      // Negative net worth is valid if user is underwater (debt exceeds collateral)
+      netWorth: netWorth,
+      // Use contract values for totals (more accurate than manual calculation)
+      totalSupplied: totalCollateralValue, // Use contract's totalCollateralValue
+      totalBorrowed: totalDebtValue, // Use contract's totalDebtValue
       availableToBorrow,
       healthFactor,
       netApy,
@@ -1131,13 +1240,10 @@ export async function calculateSimulatedHealthFactor(
     return null;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
-    const accountData = await publicClient.readContract({
+    const accountData = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getUserAccountData',
@@ -1244,10 +1350,7 @@ export async function approveUSDC(amount: number): Promise<string> {
     });
 
     // Wait for transaction confirmation
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
     await publicClient.waitForTransactionReceipt({ hash });
     return hash;
@@ -1265,13 +1368,10 @@ async function findUSDCReserveId(): Promise<bigint | null> {
     return null;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
-    const reserveCount = await publicClient.readContract({
+    const reserveCount = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getReserveCount',
@@ -1281,7 +1381,7 @@ async function findUSDCReserveId(): Promise<bigint | null> {
 
     for (let i = 0n; i < reserveCount; i++) {
       try {
-        const reserve = await publicClient.readContract({
+        const reserve = await readContractWithThrottle({
           address: SPOKE_ADDRESS,
           abi: SPOKE_ABI,
           functionName: 'getReserve',
@@ -1328,12 +1428,9 @@ export async function supplyUSDC(
 
   try {
     // First, check if we need to approve
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
-    const allowance = await publicClient.readContract({
+    const allowance = await readContractWithThrottle({
       address: USDC_ADDRESS,
       abi: ERC20_ABI,
       functionName: 'allowance',
@@ -1396,13 +1493,10 @@ export async function isReserveEnabledAsCollateral(
     return false;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
-    const [isUsingAsCollateral] = await publicClient.readContract({
+    const [isUsingAsCollateral] = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getUserReserveStatus',
@@ -1439,10 +1533,7 @@ export async function setUsingAsCollateral(
   }
 
   try {
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
     const hash = await walletClient.writeContract({
       address: SPOKE_ADDRESS,
@@ -1503,10 +1594,7 @@ export async function borrowUSDC(
     }
 
     // Borrow (no approval needed, we're receiving tokens)
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
     const hash = await walletClient.writeContract({
       address: SPOKE_ADDRESS,
@@ -1556,10 +1644,7 @@ export async function withdrawUSDC(
     }
 
     // Withdraw (no approval needed, we're receiving tokens)
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
     const hash = await walletClient.writeContract({
       address: SPOKE_ADDRESS,
@@ -1609,12 +1694,9 @@ export async function repayUSDC(
     }
 
     // Check if we need to approve
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
-    const allowance = await publicClient.readContract({
+    const allowance = await readContractWithThrottle({
       address: USDC_ADDRESS,
       abi: ERC20_ABI,
       functionName: 'allowance',
@@ -1651,69 +1733,101 @@ export async function repayUSDC(
 /**
  * Find reserve ID for an asset by its underlying address
  */
-async function getAssetReserveId(assetAddress: Address): Promise<bigint | null> {
+async function getAssetReserveId(assetAddress: Address, retries = 3): Promise<bigint | null> {
   if (SPOKE_ADDRESS === '0x0000000000000000000000000000000000000000') {
     return null;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
-
-  try {
-    const reserveCount = await publicClient.readContract({
-      address: SPOKE_ADDRESS,
-      abi: SPOKE_ABI,
-      functionName: 'getReserveCount',
-    });
-
-    for (let i = 0n; i < reserveCount; i++) {
-      try {
-        const reserve = await publicClient.readContract({
-          address: SPOKE_ADDRESS,
-          abi: SPOKE_ABI,
-          functionName: 'getReserve',
-          args: [i],
-        });
-
-        if (reserve.underlying.toLowerCase() === assetAddress.toLowerCase()) {
-          return i;
-        }
-      } catch (error: any) {
-        console.warn(`Error fetching reserve ${i}:`, error?.message);
-        continue;
-      }
-    }
-
-    return null;
-  } catch (error: any) {
-    console.error('Error finding asset reserve ID:', error);
-    return null;
+  const addressKey = assetAddress.toLowerCase();
+  const now = Date.now();
+  
+  // Check cache first
+  const cachedId = reserveIdCache.get(addressKey);
+  const cacheTime = reserveIdCacheTimestamp.get(addressKey) || 0;
+  if (cachedId !== undefined && (now - cacheTime) < CACHE_TTL) {
+    return cachedId;
   }
+
+  const publicClient = getPublicClient();
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const reserveCount = await readContractWithThrottle({
+        address: SPOKE_ADDRESS,
+        abi: SPOKE_ABI,
+        functionName: 'getReserveCount',
+      });
+
+      for (let i = 0n; i < reserveCount; i++) {
+        try {
+          const reserve = await readContractWithThrottle({
+            address: SPOKE_ADDRESS,
+            abi: SPOKE_ABI,
+            functionName: 'getReserve',
+            args: [i],
+          });
+
+          if (reserve.underlying.toLowerCase() === addressKey) {
+            // Cache the result
+            reserveIdCache.set(addressKey, i);
+            reserveIdCacheTimestamp.set(addressKey, now);
+            return i;
+          }
+        } catch (error: any) {
+          if (attempt === retries - 1) {
+            console.warn(`Error fetching reserve ${i} (final attempt):`, error?.message);
+          }
+          continue;
+        }
+      }
+
+      // Not found - cache null result
+      reserveIdCache.set(addressKey, null);
+      reserveIdCacheTimestamp.set(addressKey, now);
+      return null;
+    } catch (error: any) {
+      if (attempt === retries - 1) {
+        console.error(`Error finding asset reserve ID (${retries} attempts failed):`, error);
+        // Cache null on final failure
+        reserveIdCache.set(addressKey, null);
+        reserveIdCacheTimestamp.set(addressKey, now);
+        return null;
+      }
+      // Wait before retry
+      await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+    }
+  }
+
+  return null;
 }
 
 /**
  * Get asset decimals
  */
-async function getAssetDecimals(assetAddress: Address): Promise<number> {
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+async function getAssetDecimals(assetAddress: Address, retries = 2): Promise<number> {
+  const publicClient = getPublicClient();
 
-  try {
-    const decimals = await publicClient.readContract({
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+    const decimals = await readContractWithThrottle({
       address: assetAddress,
       abi: ERC20_ABI,
       functionName: 'decimals',
     });
-    return Number(decimals);
-  } catch (error: any) {
-    console.error('Error fetching asset decimals:', error);
-    // Default to 6 for USDC/EURC
-    return 6;
+      return Number(decimals);
+    } catch (error: any) {
+      if (attempt === retries - 1) {
+        console.error(`Error fetching asset decimals (${retries} attempts failed):`, error);
+        // Default to 6 for USDC/EURC, 18 for USDT
+        if (assetAddress.toLowerCase() === USDT_ADDRESS.toLowerCase()) {
+          return 18;
+        }
+        return 6;
+      }
+      await new Promise(resolve => setTimeout(resolve, 300 * (attempt + 1)));
+    }
   }
+  return 6;
 }
 
 /**
@@ -1743,10 +1857,7 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
     return null;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
     // Find reserve ID
@@ -1757,7 +1868,7 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
     }
 
     // Get reserve info
-    const reserve = await publicClient.readContract({
+    const reserve = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getReserve',
@@ -1770,7 +1881,7 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
     const dynamicConfigKey = BigInt(reserve.dynamicConfigKey);
 
     // Get liquidity (supplied assets)
-    const suppliedAssets = await publicClient.readContract({
+    const suppliedAssets = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getReserveSuppliedAssets',
@@ -1781,7 +1892,7 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
     let drawnDebt = 0n;
     let premiumDebt = 0n;
     try {
-      [drawnDebt, premiumDebt] = await publicClient.readContract({
+      [drawnDebt, premiumDebt] = await readContractWithThrottle({
         address: hubAddress,
         abi: HUB_ABI,
         functionName: 'getSpokeOwed',
@@ -1791,33 +1902,43 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
       console.warn('Error fetching debt:', error?.message);
     }
 
-    // Get asset config
+    // Get asset config (required for APY calculation)
     let assetConfig;
     try {
-      assetConfig = await publicClient.readContract({
+      assetConfig = await readContractWithThrottle({
         address: hubAddress,
         abi: HUB_ABI,
         functionName: 'getAssetConfig',
         args: [assetId],
       });
     } catch (error: any) {
-      console.warn('Error fetching asset config:', error?.message);
-      return null;
+      console.warn(`Error fetching asset config for ${assetSymbol}:`, error?.message);
+      // Asset config is needed for APY calculation, but we can still show other data
+      // We'll handle this in the APY calculation section
     }
 
     // Get dynamic reserve config for collateral factor
     let dynamicConfig;
     try {
-      dynamicConfig = await publicClient.readContract({
+      dynamicConfig = await readContractWithThrottle({
         address: SPOKE_ADDRESS,
         abi: SPOKE_ABI,
         functionName: 'getDynamicReserveConfig',
         args: [reserveId, dynamicConfigKey],
       });
     } catch (error: any) {
-      console.warn('Error fetching dynamic config:', error?.message);
+      console.warn(`Error fetching dynamic config for ${assetSymbol}:`, error?.message);
+      // Don't return null - we can still show liquidity and other data
+    }
+
+    // Dynamic config is essential for collateral factor - return null if missing
+    if (!dynamicConfig) {
+      console.warn(`Missing dynamicConfig for ${assetSymbol} - cannot display collateral factor`);
       return null;
     }
+    
+    // Asset config is needed for accurate APY, but we can use defaults if missing
+    // We'll handle this in the APY calculation section
 
     // Calculate APYs (using same logic as USDC - RAY precision)
     const liquidity = suppliedAssets;
@@ -1833,7 +1954,7 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
       let deficit = 0n;
       let swept = 0n;
       try {
-        const hubAsset = await publicClient.readContract({
+        const hubAsset = await readContractWithThrottle({
           address: hubAddress,
           abi: HUB_ABI,
           functionName: 'getAsset',
@@ -1849,27 +1970,47 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
       
       // Prefer calculateInterestRate as it gives the current rate based on current state
       let borrowRateRay = 0n;
-      try {
-        borrowRateRay = await publicClient.readContract({
-          address: irStrategy,
-          abi: IR_STRATEGY_ABI,
-          functionName: 'calculateInterestRate',
-          args: [assetId, liquidity, totalDebt, deficit, swept],
-        });
-      } catch (error: any) {
-        // If calculateInterestRate fails (e.g., interest rate data not set), 
-        // fall back to getAssetDrawnRate (but this may be outdated)
-        console.warn(`calculateInterestRate failed for ${assetSymbol}, using getAssetDrawnRate:`, error?.message);
+      
+      // Skip calculateInterestRate if both liquidity and debt are zero (no point calling)
+      if (liquidity === 0n && totalDebt === 0n) {
+        // Use getAssetDrawnRate for zero liquidity/debt scenarios
         try {
-          borrowRateRay = await publicClient.readContract({
+          borrowRateRay = await readContractWithThrottle({
             address: hubAddress,
             abi: HUB_ABI,
             functionName: 'getAssetDrawnRate',
             args: [assetId],
           });
-        } catch (error2: any) {
-          console.warn(`getAssetDrawnRate also failed for ${assetSymbol}:`, error2?.message);
-          throw new Error(`Could not get interest rate for ${assetSymbol}`);
+        } catch (error: any) {
+          // If both fail, default to 0 (no interest rate available)
+          console.debug(`Could not get interest rate for ${assetSymbol} (zero liquidity/debt):`, error?.message);
+          borrowRateRay = 0n;
+        }
+      } else {
+        try {
+        borrowRateRay = await readContractWithThrottle({
+          address: irStrategy,
+          abi: IR_STRATEGY_ABI,
+          functionName: 'calculateInterestRate',
+          args: [assetId, liquidity, totalDebt, deficit, swept],
+        });
+        } catch (error: any) {
+          // If calculateInterestRate fails (e.g., interest rate data not set), 
+          // fall back to getAssetDrawnRate (but this may be outdated)
+          // Use console.debug instead of console.warn to reduce noise for expected failures
+          console.debug(`calculateInterestRate failed for ${assetSymbol}, using getAssetDrawnRate:`, error?.message);
+          try {
+            borrowRateRay = await readContractWithThrottle({
+              address: hubAddress,
+              abi: HUB_ABI,
+              functionName: 'getAssetDrawnRate',
+              args: [assetId],
+            });
+          } catch (error2: any) {
+            // If both fail, default to 0 (no interest rate available)
+            console.debug(`getAssetDrawnRate also failed for ${assetSymbol}:`, error2?.message);
+            borrowRateRay = 0n;
+          }
         }
       }
 
@@ -1893,15 +2034,28 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
         utilization = Number(utilizationWad) / Number(WAD);
       }
       
-      const liquidityFeeBps = Number(assetConfig.liquidityFee);
-      const liquidityFee = liquidityFeeBps / 10000;
-      supplyApy = borrowApy * utilization * (1 - liquidityFee);
+      // Ensure we have assetConfig before accessing it
+      if (assetConfig) {
+        const liquidityFeeBps = Number(assetConfig.liquidityFee);
+        const liquidityFee = liquidityFeeBps / 10000;
+        supplyApy = borrowApy * utilization * (1 - liquidityFee);
+      } else {
+        // If no assetConfig, we can't calculate accurate APY, but still return other data
+        // Use 0% liquidity fee as fallback
+        console.warn(`Missing assetConfig for ${assetSymbol} - using default 0% liquidity fee for APY calculation`);
+        supplyApy = borrowApy * utilization;
+      }
       
     } catch (error: any) {
       console.warn(`Error calculating ${assetSymbol} APYs:`, error?.message);
     }
 
     // Collateral factor is in BPS (1e4 = 100%)
+    // Ensure we have dynamicConfig before accessing it
+    if (!dynamicConfig) {
+      console.warn(`Missing dynamicConfig for ${assetSymbol} - cannot calculate collateral factor`);
+      return null;
+    }
     const collateralFactor = parseFloat(formatUnits(dynamicConfig.collateralFactor, 4));
 
     // Get price
@@ -1943,7 +2097,15 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
       decimals: Number(decimals),
     };
   } catch (error: any) {
-    console.error(`Error fetching ${assetSymbol} data:`, error);
+    // Log the error with more context
+    console.error(`Error fetching ${assetSymbol} data:`, {
+      error: error?.message || error,
+      assetSymbol,
+      assetAddress,
+      stack: error?.stack,
+    });
+    
+    // Return null to indicate failure - caller should retry
     return null;
   }
 }
@@ -1958,16 +2120,13 @@ export async function getUserAssetBalance(assetSymbol: string, userAddress: Addr
     return 0;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
     // For balance, we use the actual ERC20 decimals since we're reading directly from the token contract
     const decimals = await getAssetDecimals(assetAddress);
     
-    const balance = await publicClient.readContract({
+    const balance = await readContractWithThrottle({
       address: assetAddress,
       abi: ERC20_ABI,
       functionName: 'balanceOf',
@@ -1986,7 +2145,7 @@ export async function getUserAssetBalance(assetSymbol: string, userAddress: Addr
 /**
  * Get user's supplied amount for an asset
  */
-export async function getUserSuppliedAsset(assetSymbol: string, userAddress: Address): Promise<number> {
+export async function getUserSuppliedAsset(assetSymbol: string, userAddress: Address, retries = 3): Promise<number> {
   if (SPOKE_ADDRESS === '0x0000000000000000000000000000000000000000') {
     return 0;
   }
@@ -1996,31 +2155,32 @@ export async function getUserSuppliedAsset(assetSymbol: string, userAddress: Add
     return 0;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
-  try {
-    const reserveId = await getAssetReserveId(assetAddress);
-    if (reserveId === null) {
-      return 0;
-    }
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const reserveId = await getAssetReserveId(assetAddress);
+      if (reserveId === null) {
+        if (attempt === retries - 1) {
+          console.warn(`Reserve not found for ${assetSymbol} after ${retries} attempts`);
+        }
+        return 0;
+      }
 
-    // Get reserve to get the correct decimals (as stored in the contract)
-    const reserve = await publicClient.readContract({
-      address: SPOKE_ADDRESS,
-      abi: SPOKE_ABI,
-      functionName: 'getReserve',
-      args: [reserveId],
-    });
+      // Get reserve to get the correct decimals (as stored in the contract)
+      const reserve = await readContractWithThrottle({
+        address: SPOKE_ADDRESS,
+        abi: SPOKE_ABI,
+        functionName: 'getReserve',
+        args: [reserveId],
+      });
 
-    const suppliedAssets = await publicClient.readContract({
-      address: SPOKE_ADDRESS,
-      abi: SPOKE_ABI,
-      functionName: 'getUserSuppliedAssets',
-      args: [reserveId, userAddress],
-    });
+      const suppliedAssets = await readContractWithThrottle({
+        address: SPOKE_ADDRESS,
+        abi: SPOKE_ABI,
+        functionName: 'getUserSuppliedAssets',
+        args: [reserveId, userAddress],
+      });
 
     // Get actual token decimals
     const tokenDecimals = await getAssetDecimals(assetAddress);
@@ -2044,18 +2204,24 @@ export async function getUserSuppliedAsset(assetSymbol: string, userAddress: Add
       }
     }
     
-    // Use reserve decimals if they match
-    return parseFloat(formatUnits(suppliedAssets, reserveDecimals));
-  } catch (error: any) {
-    console.error(`Error fetching ${assetSymbol} supplied amount:`, error);
-    return 0;
+      // Use reserve decimals if they match
+      return parseFloat(formatUnits(suppliedAssets, reserveDecimals));
+    } catch (error: any) {
+      if (attempt === retries - 1) {
+        console.error(`Error fetching ${assetSymbol} supplied amount (${retries} attempts failed):`, error);
+        return 0;
+      }
+      // Wait before retry with exponential backoff
+      await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+    }
   }
+  return 0;
 }
 
 /**
  * Get user's borrowed amount for an asset
  */
-export async function getUserBorrowedAsset(assetSymbol: string, userAddress: Address): Promise<number> {
+export async function getUserBorrowedAsset(assetSymbol: string, userAddress: Address, retries = 3): Promise<number> {
   if (SPOKE_ADDRESS === '0x0000000000000000000000000000000000000000') {
     return 0;
   }
@@ -2065,26 +2231,27 @@ export async function getUserBorrowedAsset(assetSymbol: string, userAddress: Add
     return 0;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
-  try {
-    const reserveId = await getAssetReserveId(assetAddress);
-    if (reserveId === null) {
-      return 0;
-    }
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const reserveId = await getAssetReserveId(assetAddress);
+      if (reserveId === null) {
+        if (attempt === retries - 1) {
+          console.warn(`Reserve not found for ${assetSymbol} after ${retries} attempts`);
+        }
+        return 0;
+      }
 
-    // Get reserve to get the correct decimals (as stored in the contract)
-    const reserve = await publicClient.readContract({
-      address: SPOKE_ADDRESS,
-      abi: SPOKE_ABI,
-      functionName: 'getReserve',
-      args: [reserveId],
-    });
+      // Get reserve to get the correct decimals (as stored in the contract)
+      const reserve = await readContractWithThrottle({
+        address: SPOKE_ADDRESS,
+        abi: SPOKE_ABI,
+        functionName: 'getReserve',
+        args: [reserveId],
+      });
 
-    const totalDebt = await publicClient.readContract({
+    const totalDebt = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getUserTotalDebt',
@@ -2113,12 +2280,18 @@ export async function getUserBorrowedAsset(assetSymbol: string, userAddress: Add
       }
     }
     
-    // Use reserve decimals if they match
-    return parseFloat(formatUnits(totalDebt, reserveDecimals));
-  } catch (error: any) {
-    console.error(`Error fetching ${assetSymbol} borrowed amount:`, error);
-    return 0;
+      // Use reserve decimals if they match
+      return parseFloat(formatUnits(totalDebt, reserveDecimals));
+    } catch (error: any) {
+      if (attempt === retries - 1) {
+        console.error(`Error fetching ${assetSymbol} borrowed amount (${retries} attempts failed):`, error);
+        return 0;
+      }
+      // Wait before retry with exponential backoff
+      await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+    }
   }
+  return 0;
 }
 
 /**
@@ -2153,10 +2326,7 @@ export async function approveAsset(assetSymbol: string, amount: number): Promise
       account,
     });
 
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
     await publicClient.waitForTransactionReceipt({ hash });
     return hash;
@@ -2190,12 +2360,9 @@ export async function supplyAsset(assetSymbol: string, amount: number, onBehalfO
   const amountInWei = parseUnits(amount.toString(), decimals);
 
   try {
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
-    const allowance = await publicClient.readContract({
+    const allowance = await readContractWithThrottle({
       address: assetAddress,
       abi: ERC20_ABI,
       functionName: 'allowance',
@@ -2270,10 +2437,7 @@ export async function borrowAsset(assetSymbol: string, amount: number, onBehalfO
       throw new Error(`${assetSymbol} reserve not found in Spoke`);
     }
 
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
     console.log(`Borrowing ${assetSymbol}...`);
     const hash = await walletClient.writeContract({
@@ -2321,10 +2485,7 @@ export async function withdrawAsset(assetSymbol: string, amount: number, onBehal
       throw new Error(`${assetSymbol} reserve not found in Spoke`);
     }
 
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
     console.log(`Withdrawing ${assetSymbol}...`);
     const hash = await walletClient.writeContract({
@@ -2372,12 +2533,9 @@ export async function repayAsset(assetSymbol: string, amount: number, onBehalfOf
       throw new Error(`${assetSymbol} reserve not found in Spoke`);
     }
 
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
-    const allowance = await publicClient.readContract({
+    const allowance = await readContractWithThrottle({
       address: assetAddress,
       abi: ERC20_ABI,
       functionName: 'allowance',
@@ -2419,10 +2577,7 @@ export async function getMaxWithdrawableAsset(assetSymbol: string, userAddress: 
     return 0;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
     const reserveId = await getAssetReserveId(assetAddress);
@@ -2434,7 +2589,7 @@ export async function getMaxWithdrawableAsset(assetSymbol: string, userAddress: 
     const suppliedAmount = await getUserSuppliedAsset(assetSymbol, userAddress);
     
     // If no debt, can withdraw all
-    const accountData = await publicClient.readContract({
+    const accountData = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getUserAccountData',
@@ -2458,7 +2613,7 @@ export async function getMaxWithdrawableAsset(assetSymbol: string, userAddress: 
     const maxWithdrawableValue = Math.max(0, totalCollateralValue - minCollateralNeeded);
 
     // Check if asset is being used as collateral
-    const [isUsingAsCollateral] = await publicClient.readContract({
+    const [isUsingAsCollateral] = await readContractWithThrottle({
       address: SPOKE_ADDRESS,
       abi: SPOKE_ABI,
       functionName: 'getUserReserveStatus',
@@ -2503,13 +2658,10 @@ export async function getFlashLoanFeeBps(hubAddress?: Address): Promise<number> 
     return 9; // Default 0.09% = 9 bps
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
-    const feeBps = await publicClient.readContract({
+    const feeBps = await readContractWithThrottle({
       address: hub,
       abi: HUB_ABI,
       functionName: 'FLASH_LOAN_FEE_BPS',
@@ -2525,20 +2677,17 @@ export async function getFlashLoanFeeBps(hubAddress?: Address): Promise<number> 
  * Get asset ID for an asset in the Hub
  */
 async function getAssetIdInHub(assetAddress: Address, hubAddress: Address): Promise<number | null> {
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
-    const assetCount = await publicClient.readContract({
+    const assetCount = await readContractWithThrottle({
       address: hubAddress,
       abi: HUB_ABI,
       functionName: 'getAssetCount',
     });
 
     for (let i = 0; i < Number(assetCount); i++) {
-      const [underlying] = await publicClient.readContract({
+      const [underlying] = await readContractWithThrottle({
         address: hubAddress,
         abi: HUB_ABI,
         functionName: 'getAssetUnderlyingAndDecimals',
@@ -2571,10 +2720,7 @@ export async function getFlashLoanLiquidity(assetSymbol: string, hubAddress?: Ad
     return 0;
   }
 
-  const publicClient = createPublicClient({
-    chain: ARC_TESTNET,
-    transport: http(),
-  });
+  const publicClient = getPublicClient();
 
   try {
     const assetId = await getAssetIdInHub(assetAddress, hub);
@@ -2582,7 +2728,7 @@ export async function getFlashLoanLiquidity(assetSymbol: string, hubAddress?: Ad
       return 0;
     }
 
-    const liquidity = await publicClient.readContract({
+    const liquidity = await readContractWithThrottle({
       address: hub,
       abi: HUB_ABI,
       functionName: 'getAssetLiquidity',
@@ -2643,10 +2789,7 @@ export async function executeFlashLoan(
   const amountInWei = parseUnits(amount.toString(), decimals);
 
   try {
-    const publicClient = createPublicClient({
-      chain: ARC_TESTNET,
-      transport: http(),
-    });
+    const publicClient = getPublicClient();
 
     const assetId = await getAssetIdInHub(assetAddress, hub);
     if (assetId === null) {

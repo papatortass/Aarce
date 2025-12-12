@@ -1,7 +1,7 @@
 import React, { useContext, useEffect, useState } from 'react';
 import { useWallet } from '../contexts/WalletContext';
 import { ModalContext } from './AppLayout';
-import { Card, Button, TableHeader, TableRow, TableCell, Badge } from '../components/UI';
+import { Card, Button, TableHeader, TableRow, TableCell, Badge, LoadingDots } from '../components/UI';
 import { MOCK_ASSETS } from '../constants';
 import { Wallet, TrendingUp, AlertTriangle, ArrowUpRight } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -41,8 +41,8 @@ export default function Dashboard() {
   useEffect(() => {
     if (isConnected && address) {
       loadDashboardData();
-      // Refresh every 30 seconds
-      const interval = setInterval(loadDashboardData, 30000);
+      // Refresh every 60 seconds (reduced frequency to avoid rate limits)
+      const interval = setInterval(loadDashboardData, 60000);
       return () => clearInterval(interval);
     } else {
       setIsLoading(false);
@@ -59,21 +59,44 @@ export default function Dashboard() {
       setPortfolioData(portfolio);
 
       // Load market data and user positions for all assets
+      // Use Promise.all for parallel fetching but with better error handling
       const dataMap = new Map<string, any>();
       const positionsMap = new Map<string, { supplied: number; borrowed: number }>();
       
+      // Fetch all data sequentially to avoid rate limits (throttling handles the spacing)
+      // Process assets one at a time to prevent overwhelming the RPC
       for (const asset of MOCK_ASSETS) {
-        // Fetch market data
-        const data = await fetchAssetData(asset.symbol);
-        if (data) {
-          dataMap.set(asset.symbol, data);
-        }
-        
-        // Fetch user positions
-        const supplied = await getUserSuppliedAsset(asset.symbol, address);
-        const borrowed = await getUserBorrowedAsset(asset.symbol, address);
-        if (supplied > 0 || borrowed > 0) {
-          positionsMap.set(asset.symbol, { supplied, borrowed });
+        try {
+          // Fetch market data and user positions sequentially (throttling will space them out)
+          const [data, supplied, borrowed] = await Promise.allSettled([
+            fetchAssetData(asset.symbol),
+            getUserSuppliedAsset(asset.symbol, address),
+            getUserBorrowedAsset(asset.symbol, address),
+          ]);
+
+          // Handle market data
+          if (data.status === 'fulfilled' && data.value) {
+            dataMap.set(asset.symbol, data.value);
+          } else if (data.status === 'rejected') {
+            console.error(`Error fetching market data for ${asset.symbol}:`, data.reason);
+          }
+
+          // Handle user positions
+          const suppliedValue = supplied.status === 'fulfilled' ? supplied.value : 0;
+          const borrowedValue = borrowed.status === 'fulfilled' ? borrowed.value : 0;
+          
+          if (supplied.status === 'rejected') {
+            console.error(`Error fetching supplied amount for ${asset.symbol}:`, supplied.reason);
+          }
+          if (borrowed.status === 'rejected') {
+            console.error(`Error fetching borrowed amount for ${asset.symbol}:`, borrowed.reason);
+          }
+
+          if (suppliedValue > 0 || borrowedValue > 0) {
+            positionsMap.set(asset.symbol, { supplied: suppliedValue, borrowed: borrowedValue });
+          }
+        } catch (error) {
+          console.error(`Error processing asset ${asset.symbol}:`, error);
         }
       }
       
@@ -134,7 +157,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard 
           label="Net Worth" 
-          value={isLoading ? '...' : `$${portfolioData?.netWorth.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '0.00'}`} 
+          value={isLoading ? '...' : `$${Math.max(0, portfolioData?.netWorth ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} 
         />
         <StatCard 
           label="Net APY" 
@@ -193,7 +216,9 @@ export default function Dashboard() {
            </div>
            <Card className="p-0 overflow-hidden" noPadding>
              {isLoading ? (
-               <div className="p-8 text-center text-gray-400">Loading...</div>
+               <div className="p-8 text-center text-gray-400 flex items-center justify-center">
+                 <LoadingDots />
+               </div>
              ) : assetsWithPositions.filter(a => a.supplied > 0).length > 0 ? (
                <table className="w-full">
                  <TableHeader headers={['Asset', 'APY', 'Balance', 'Action']} />
@@ -217,12 +242,12 @@ export default function Dashboard() {
                                </div>
                              </div>
                            </TableCell>
-                           <TableCell>
+                           <TableCell className="text-right">
                              <span className="text-emerald-600 font-medium bg-emerald-50 px-2 py-0.5 rounded">
                                {data?.supplyApy.toFixed(2) ?? '0.00'}%
                              </span>
                            </TableCell>
-                           <TableCell>
+                           <TableCell className="text-right">
                               <div className="font-medium text-gray-900">{asset.supplied.toFixed(6)}</div>
                               <div className="text-xs text-gray-400">${(asset.supplied * asset.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                            </TableCell>
@@ -251,7 +276,9 @@ export default function Dashboard() {
            </div>
            <Card className="p-0 overflow-hidden" noPadding>
              {isLoading ? (
-               <div className="p-8 text-center text-gray-400">Loading...</div>
+               <div className="p-8 text-center text-gray-400 flex items-center justify-center">
+                 <LoadingDots />
+               </div>
              ) : assetsWithPositions.filter(a => a.borrowed > 0).length > 0 ? (
                <table className="w-full">
                  <TableHeader headers={['Asset', 'APY', 'Debt', 'Action']} />
@@ -275,12 +302,12 @@ export default function Dashboard() {
                                </div>
                              </div>
                            </TableCell>
-                           <TableCell>
+                           <TableCell className="text-right">
                              <span className="text-amber-600 font-medium bg-amber-50 px-2 py-0.5 rounded">
                                {data?.borrowApy.toFixed(2) ?? '0.00'}%
                              </span>
                            </TableCell>
-                           <TableCell>
+                           <TableCell className="text-right">
                               <div className="font-medium text-gray-900">{asset.borrowed.toFixed(6)}</div>
                               <div className="text-xs text-gray-400">${(asset.borrowed * asset.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                            </TableCell>

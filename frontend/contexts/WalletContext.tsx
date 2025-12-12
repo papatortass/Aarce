@@ -1,28 +1,11 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from 'react';
-import { createPublicClient, http, formatEther, type Address, type Chain } from 'viem';
+import { formatEther, type Address, type PublicClient } from 'viem';
+// Import the shared public client and chain config from contracts service
+import { getPublicClient as getContractsPublicClient, ARC_TESTNET, getBalanceWithThrottle } from '../services/contracts';
 
-// Arc Testnet configuration
-const ARC_TESTNET: Chain = {
-  id: 5042002,
-  name: 'Arc Testnet',
-  nativeCurrency: {
-    decimals: 18,
-    name: 'Arc',
-    symbol: 'ARC',
-  },
-  rpcUrls: {
-    default: {
-      http: ['https://rpc.testnet.arc.network'],
-    },
-  },
-  blockExplorers: {
-    default: {
-      name: 'Arc Explorer',
-      url: 'https://testnet.arcscan.app',
-    },
-  },
-  testnet: true,
-};
+function getPublicClient(): PublicClient {
+  return getContractsPublicClient();
+}
 
 interface WalletContextType {
   isConnected: boolean;
@@ -121,12 +104,10 @@ export const WalletProvider: React.FC<WalletProviderProps> = ({ children }) => {
     if (!address || !chainId) return;
 
     try {
-      const publicClient = createPublicClient({
-        chain: ARC_TESTNET,
-        transport: http(),
-      });
+      const publicClient = getPublicClient();
 
-      const balanceWei = await publicClient.getBalance({ address });
+      // Use throttled request for balance check
+      const balanceWei = await getBalanceWithThrottle(address);
       const balanceEth = formatEther(balanceWei);
       setBalance(balanceEth);
     } catch (err) {

@@ -107,11 +107,23 @@ export const Badge: React.FC<{ children: React.ReactNode; variant?: 'success' | 
 export const TableHeader: React.FC<{ headers: string[] }> = ({ headers }) => (
   <thead>
     <tr className="border-b border-gray-100 bg-gray-50/50">
-      {headers.map((h, i) => (
-        <th key={i} className={`py-3 px-6 text-xs font-semibold text-gray-400 uppercase tracking-wider ${i === 0 ? 'text-left' : 'text-right'}`}>
-          {h}
-        </th>
-      ))}
+      {headers.map((h, i) => {
+        // Determine alignment based on header content and position
+        // First column: left-aligned (asset names)
+        // Last column: right-aligned (actions)
+        // APY, Amount, Balance, Debt, Liquidity, Fee columns: right-aligned (numeric)
+        const isNumericColumn = /(APY|Amount|Balance|Debt|Liquidity|Fee|Collateral Factor)/i.test(h);
+        const alignment = i === 0 
+          ? 'text-left' 
+          : i === headers.length - 1 || isNumericColumn
+          ? 'text-right'
+          : 'text-left';
+        return (
+          <th key={i} className={`py-3 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider ${alignment}`}>
+            {h}
+          </th>
+        );
+      })}
     </tr>
   </thead>
 );
@@ -126,7 +138,54 @@ export const TableRow: React.FC<{ children: React.ReactNode; onClick?: () => voi
 );
 
 export const TableCell: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className = '' }) => (
-  <td className={`py-4 px-6 text-sm text-gray-900 ${className}`}>
+  <td className={`py-4 px-4 text-sm text-gray-900 ${className}`}>
     {children}
   </td>
 );
+
+// --- LOADING DOTS ---
+export const LoadingDots: React.FC<{ className?: string; size?: 'sm' | 'md' | 'lg' }> = ({ className = '', size = 'md' }) => {
+  const sizes = {
+    sm: 'w-1 h-1',
+    md: 'w-1.5 h-1.5',
+    lg: 'w-2 h-2',
+  };
+
+  return (
+    <div className={`inline-flex items-center gap-1 ${className}`}>
+      <span 
+        className={`${sizes[size]} bg-gray-400 rounded-full`}
+        style={{
+          animation: 'loadingDots 1.4s ease-in-out infinite',
+          animationDelay: '0ms'
+        }}
+      ></span>
+      <span 
+        className={`${sizes[size]} bg-gray-400 rounded-full`}
+        style={{
+          animation: 'loadingDots 1.4s ease-in-out infinite',
+          animationDelay: '200ms'
+        }}
+      ></span>
+      <span 
+        className={`${sizes[size]} bg-gray-400 rounded-full`}
+        style={{
+          animation: 'loadingDots 1.4s ease-in-out infinite',
+          animationDelay: '400ms'
+        }}
+      ></span>
+      <style>{`
+        @keyframes loadingDots {
+          0%, 60%, 100% {
+            opacity: 0.3;
+            transform: scale(0.8);
+          }
+          30% {
+            opacity: 1;
+            transform: scale(1);
+          }
+        }
+      `}</style>
+    </div>
+  );
+};
