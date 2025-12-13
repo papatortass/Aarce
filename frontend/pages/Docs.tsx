@@ -61,7 +61,7 @@ const DOCS_CONTENT: Record<string, JSX.Element> = {
             </tr>
             <tr>
               <td className="px-4 py-3 text-sm text-gray-600">USDT</td>
-              <td className="px-4 py-3 text-sm font-mono text-gray-500">0x175C...7952</td>
+              <td className="px-4 py-3 text-sm font-mono text-gray-500">0x175c...7952</td>
               <td className="px-4 py-3 text-sm text-gray-600">18</td>
             </tr>
           </tbody>
@@ -920,7 +920,7 @@ const reserve = await publicClient.readContract({
             </tr>
             <tr>
               <td className="px-4 py-3 text-sm text-gray-600">USDT</td>
-              <td className="px-4 py-3 text-sm font-mono text-gray-600">0x175CdB1D338945f0D851A741ccF787D343E57952</td>
+              <td className="px-4 py-3 text-sm font-mono text-gray-600">0x175cdb1d338945f0d851a741ccf787d343e57952</td>
               <td className="px-4 py-3 text-sm text-gray-600">2</td>
             </tr>
           </tbody>

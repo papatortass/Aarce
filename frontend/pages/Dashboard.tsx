@@ -5,7 +5,7 @@ import { Card, Button, TableHeader, TableRow, TableCell, Badge, LoadingDots } fr
 import { MOCK_ASSETS } from '../constants';
 import { Wallet, TrendingUp, AlertTriangle, ArrowUpRight } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { getUserPortfolioData, getUserSuppliedAsset, getUserBorrowedAsset, fetchAssetData, type UserPortfolioData } from '../services/contracts';
+import { getUserPortfolioData, getUserSuppliedAsset, getUserBorrowedAsset, fetchAssetData, hasCachedAssetData, getCachedAssetData, type UserPortfolioData } from '../services/contracts';
 import { Asset } from '../types';
 
 const StatCard: React.FC<{ label: string; value: string; subValue?: string; accent?: boolean }> = ({ label, value, subValue, accent }) => (
@@ -28,6 +28,14 @@ const StatCard: React.FC<{ label: string; value: string; subValue?: string; acce
   </Card>
 );
 
+// Module-level cache for user positions (persists across component remounts)
+// Keyed by address to support multiple users
+const userPositionsCache = new Map<string, Map<string, { supplied: number; borrowed: number }>>();
+
+// Module-level cache for portfolio data (persists across component remounts)
+// Keyed by address to support multiple users
+const portfolioDataCache = new Map<string, UserPortfolioData>();
+
 export default function Dashboard() {
   const { isConnected, connect, address } = useWallet();
   const { openAssetModal } = useContext(ModalContext);
@@ -35,53 +43,128 @@ export default function Dashboard() {
   
   const [portfolioData, setPortfolioData] = useState<UserPortfolioData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [assetsData, setAssetsData] = useState<Map<string, any>>(new Map());
   const [userPositions, setUserPositions] = useState<Map<string, { supplied: number; borrowed: number }>>(new Map());
 
   useEffect(() => {
     if (isConnected && address) {
-      loadDashboardData();
+      // On mount/remount, immediately populate from cache if available
+      // This makes data appear instantly when switching tabs (like Markets does)
+      const cachedData = getCachedAssetData();
+      const cachedPositions = address ? userPositionsCache.get(address) : null;
+      const cachedPortfolio = address ? portfolioDataCache.get(address) : null;
+      console.log(`🔄 Dashboard mount: cache has ${cachedData.size} assets, state has ${assetsData.size}, cached positions: ${cachedPositions?.size ?? 0}, cached portfolio: ${cachedPortfolio ? 'yes' : 'no'}`);
+      
+      // Restore userPositions from module-level cache if available (preserves across remounts)
+      if (address && cachedPositions && cachedPositions.size > 0) {
+        console.log(`✅ Dashboard: Restoring ${cachedPositions.size} user positions from cache for ${address}`);
+        setUserPositions(new Map(cachedPositions));
+      }
+      
+      // Restore portfolioData from module-level cache if available (preserves across remounts)
+      if (address && cachedPortfolio) {
+        console.log(`✅ Dashboard: Restoring portfolio data from cache for ${address}`);
+        setPortfolioData(cachedPortfolio);
+      }
+      
+      if (cachedData.size > 0) {
+        // Immediately populate state with cached data (synchronously, before any async calls)
+        // Use functional update to ensure we don't lose data
+        setAssetsData(prev => {
+          if (prev.size === 0) {
+            console.log(`✅ Dashboard: Setting state from cache with ${cachedData.size} assets`);
+            return cachedData;
+          }
+          console.log(`⚠️ Dashboard: State already has ${prev.size} assets, keeping existing`);
+          return prev;
+        });
+        setIsLoading(false);
+      }
+      
+      // Use setTimeout to ensure state update completes before load function runs
+      // This prevents race condition where loadDashboardData might overwrite cached state
+      const timeoutId = setTimeout(() => {
+        loadDashboardData();
+      }, 0);
+      
       // Refresh every 60 seconds (reduced frequency to avoid rate limits)
       const interval = setInterval(loadDashboardData, 60000);
-      return () => clearInterval(interval);
+      return () => {
+        clearInterval(interval);
+        clearTimeout(timeoutId);
+      };
     } else {
+      // Don't clear data when disconnecting - preserve it for when user reconnects
       setIsLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected, address]);
 
   const loadDashboardData = async () => {
     if (!address) return;
 
-    setIsLoading(true);
-    try {
-      // Load portfolio data
-      const portfolio = await getUserPortfolioData(address);
-      setPortfolioData(portfolio);
+    // Always check cache first (it persists across remounts, state doesn't)
+    // State updates are async, so we can't rely on assetsData.size being updated yet
+    const cachedData = getCachedAssetData();
+    const hasCachedData = cachedData.size > 0;
+    const hasStateData = assetsData.size > 0 || userPositions.size > 0 || portfolioData !== null;
+    const hasNoData = !hasStateData && !hasCachedData;
+    
+    if (hasNoData && !hasLoadedOnce) {
+      setIsLoading(true);
+    } else {
+      // If we have data (in state or cache), don't show loading
+      setIsLoading(false);
+    }
 
-      // Load market data and user positions for all assets
-      // Use Promise.all for parallel fetching but with better error handling
-      const dataMap = new Map<string, any>();
-      const positionsMap = new Map<string, { supplied: number; borrowed: number }>();
+    try {
+      // Load portfolio data and asset data in parallel, but update state together for synchronization
+      // ALWAYS start with cache first (it persists across remounts)
+      // This ensures we have data even if state hasn't updated yet from useEffect
+      const dataMap = new Map<string, any>(cachedData);
+      // Then merge with current state data (state takes precedence if it exists)
+      assetsData.forEach((value, key) => {
+        if (value) { // Only merge if state has actual data
+          dataMap.set(key, value);
+        }
+      });
+      const positionsMap = new Map<string, { supplied: number; borrowed: number }>(userPositions);
       
-      // Fetch all data sequentially to avoid rate limits (throttling handles the spacing)
+      // Debug: log cache status
+      if (cachedData.size > 0) {
+        console.log(`📦 Dashboard: Starting with ${cachedData.size} cached assets, state has ${assetsData.size} assets`);
+      }
+      
+      // Start loading portfolio data and asset data in parallel
+      // We'll wait for both to complete before updating state
+      const portfolioPromise = getUserPortfolioData(address);
+      
+      // Fetch all asset data sequentially to avoid rate limits (throttling handles the spacing)
       // Process assets one at a time to prevent overwhelming the RPC
       for (const asset of MOCK_ASSETS) {
         try {
           // Fetch market data and user positions sequentially (throttling will space them out)
           const [data, supplied, borrowed] = await Promise.allSettled([
-            fetchAssetData(asset.symbol),
+            fetchAssetData(asset.symbol, true), // Use cache
             getUserSuppliedAsset(asset.symbol, address),
             getUserBorrowedAsset(asset.symbol, address),
           ]);
 
-          // Handle market data
+          // Handle market data - collect all data first, don't update state yet
+          // If fetch succeeds, use new data; if it fails or returned null, keep cached data
           if (data.status === 'fulfilled' && data.value) {
             dataMap.set(asset.symbol, data.value);
-          } else if (data.status === 'rejected') {
-            console.error(`Error fetching market data for ${asset.symbol}:`, data.reason);
+          } else {
+            // If fetch failed or returned null, keep the cached data we started with
+            // Don't remove from dataMap - the cached data is already there
+            if (data.status === 'rejected') {
+              console.error(`Error fetching market data for ${asset.symbol}:`, data.reason);
+            }
+            // If data.value is null, dataMap already has cached data (if it exists), so keep it
           }
 
-          // Handle user positions
+          // Handle user positions - collect all data first
           const suppliedValue = supplied.status === 'fulfilled' ? supplied.value : 0;
           const borrowedValue = borrowed.status === 'fulfilled' ? borrowed.value : 0;
           
@@ -100,12 +183,38 @@ export default function Dashboard() {
         }
       }
       
+      // Wait for portfolio data to complete (it may have been loading in parallel)
+      const portfolio = await portfolioPromise;
+      
+      // Update ALL state together - this synchronizes top cards and assets table
+      // Always update - dataMap already has cached data merged in, so it should never be empty
+      console.log(`💾 Dashboard: Updating state with ${dataMap.size} assets, ${positionsMap.size} positions, portfolio data`);
+      setPortfolioData(portfolio);
       setAssetsData(dataMap);
       setUserPositions(positionsMap);
+      
+      // Also update module-level caches to preserve data across remounts (keyed by address)
+      if (address) {
+        portfolioDataCache.set(address, portfolio);
+        console.log(`💾 Dashboard: Cached portfolio data for ${address}`);
+        if (positionsMap.size > 0) {
+          userPositionsCache.set(address, new Map(positionsMap));
+          console.log(`💾 Dashboard: Cached ${positionsMap.size} positions for ${address}`);
+        }
+      }
+      
+      // Mark as loaded after first successful load
+      if (!hasLoadedOnce) {
+        setHasLoadedOnce(true);
+        setIsLoading(false);
+      }
     } catch (error) {
       console.error('Error loading dashboard data:', error);
-    } finally {
-      setIsLoading(false);
+      // On first load error, still mark as loaded to prevent infinite loading
+      if (!hasLoadedOnce) {
+        setHasLoadedOnce(true);
+        setIsLoading(false);
+      }
     }
   };
 
@@ -128,8 +237,13 @@ export default function Dashboard() {
   }
 
   // Get assets with positions for display
+  // Always get cached data as fallback (React state updates are async, so state might be empty even after setState)
+  const cachedDataForDisplay = getCachedAssetData();
   const assetsWithPositions: Asset[] = MOCK_ASSETS.map(asset => {
-    const data = assetsData.get(asset.symbol);
+    // Use state data first, always fallback to cache (handles remount scenario where state hasn't updated yet)
+    const data = assetsData.get(asset.symbol) || cachedDataForDisplay.get(asset.symbol);
+    // Use userPositions state - it should be preserved on remount if it had data
+    // If empty, it means user truly has no positions (or data is still loading)
     const position = userPositions.get(asset.symbol);
     return {
       ...asset,
@@ -215,7 +329,7 @@ export default function Dashboard() {
              <Button variant="ghost" size="sm" onClick={() => navigate('/app/markets')}>Add Supply</Button>
            </div>
            <Card className="p-0 overflow-hidden" noPadding>
-             {isLoading ? (
+             {isLoading && assetsWithPositions.filter(a => a.supplied > 0).length === 0 ? (
                <div className="p-8 text-center text-gray-400 flex items-center justify-center">
                  <LoadingDots />
                </div>
@@ -226,7 +340,8 @@ export default function Dashboard() {
                    {assetsWithPositions
                      .filter(asset => asset.supplied > 0)
                      .map((asset) => {
-                       const data = assetsData.get(asset.symbol);
+                       // Use state data first, always fallback to cache
+                       const data = assetsData.get(asset.symbol) || cachedDataForDisplay.get(asset.symbol);
                        return (
                          <TableRow key={asset.id}>
                            <TableCell>
@@ -275,7 +390,7 @@ export default function Dashboard() {
              <Button variant="ghost" size="sm" onClick={() => navigate('/app/markets')}>Borrow More</Button>
            </div>
            <Card className="p-0 overflow-hidden" noPadding>
-             {isLoading ? (
+             {isLoading && assetsWithPositions.filter(a => a.borrowed > 0).length === 0 ? (
                <div className="p-8 text-center text-gray-400 flex items-center justify-center">
                  <LoadingDots />
                </div>
@@ -286,7 +401,8 @@ export default function Dashboard() {
                    {assetsWithPositions
                      .filter(asset => asset.borrowed > 0)
                      .map((asset) => {
-                       const data = assetsData.get(asset.symbol);
+                       // Use state data first, always fallback to cache
+                       const data = assetsData.get(asset.symbol) || cachedDataForDisplay.get(asset.symbol);
                        return (
                          <TableRow key={asset.id}>
                            <TableCell>

@@ -8,7 +8,9 @@ import {
   calculateFlashLoanFee,
   executeFlashLoan,
   type AssetData,
-  fetchAssetData
+  fetchAssetData,
+  hasCachedAssetData,
+  getCachedAssetData
 } from '../services/contracts';
 import { type Address } from 'viem';
 import { Asset } from '../types';
@@ -20,6 +22,7 @@ export default function FlashLoans() {
   const [assetsData, setAssetsData] = useState<Map<string, AssetData>>(new Map());
   const [flashLoanLiquidity, setFlashLoanLiquidity] = useState<Map<string, number>>(new Map());
   const [isLoading, setIsLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [flashLoanAmount, setFlashLoanAmount] = useState<string>('');
   const [receiverAddress, setReceiverAddress] = useState<string>(CONTRACT_ADDRESSES.SIMPLE_FLASH_LOAN_RECEIVER || '');
@@ -29,10 +32,62 @@ export default function FlashLoans() {
   const [feeBps, setFeeBps] = useState<number>(9);
 
   useEffect(() => {
-    loadFlashLoanData();
+    // On mount/remount, immediately populate from cache if available
+    // This makes data appear instantly when switching tabs (like Markets does)
+    const cachedData = getCachedAssetData();
+    console.log(`🔄 FlashLoans mount: cache has ${cachedData.size} assets, state has ${assetsData.size}`);
+    if (cachedData.size > 0) {
+      // Immediately populate state with cached data (synchronously, before any async calls)
+      // Use functional update to ensure we don't lose data
+      setAssetsData(prev => {
+        if (prev.size === 0) {
+          console.log(`✅ FlashLoans: Setting state from cache with ${cachedData.size} assets`);
+          return cachedData;
+        }
+        console.log(`⚠️ FlashLoans: State already has ${prev.size} assets, keeping existing`);
+        return prev;
+      });
+      
+      // Also populate flashLoanLiquidity from cached data to prevent "No liquidity" flash
+      const cachedLiquidityMap = new Map<string, number>();
+      cachedData.forEach((data, symbol) => {
+        if (data.liquidity !== undefined && data.liquidity > 0) {
+          cachedLiquidityMap.set(symbol, data.liquidity);
+        }
+      });
+      if (cachedLiquidityMap.size > 0) {
+        setFlashLoanLiquidity(prev => {
+          if (prev.size === 0) {
+            console.log(`✅ FlashLoans: Setting flashLoanLiquidity from cache with ${cachedLiquidityMap.size} entries`);
+            return cachedLiquidityMap;
+          }
+          // Merge: state takes precedence, but fill in missing entries from cache
+          const merged = new Map(prev);
+          cachedLiquidityMap.forEach((value, key) => {
+            if (!merged.has(key) || merged.get(key) === 0) {
+              merged.set(key, value);
+            }
+          });
+          return merged;
+        });
+      }
+      
+      setIsLoading(false);
+    }
+    
+    // Use setTimeout to ensure state update completes before load function runs
+    // This prevents race condition where loadFlashLoanData might overwrite cached state
+    const timeoutId = setTimeout(() => {
+      loadFlashLoanData();
+    }, 0);
+    
     // Refresh every 60 seconds (reduced frequency to avoid rate limits)
     const interval = setInterval(loadFlashLoanData, 60000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(timeoutId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -42,76 +97,140 @@ export default function FlashLoans() {
   }, []);
 
   const loadFlashLoanData = async () => {
-    setIsLoading(true);
-    const dataMap = new Map<string, AssetData>();
-    const liquidityMap = new Map<string, number>();
+    // Always check cache first (it persists across remounts, state doesn't)
+    // State updates are async, so we can't rely on assetsData.size being updated yet
+    const cachedData = getCachedAssetData();
+    const hasCachedData = cachedData.size > 0;
+    const hasStateData = assetsData.size > 0 || flashLoanLiquidity.size > 0;
+    const hasNoData = !hasStateData && !hasCachedData;
     
-    // Fetch data for all assets with retry logic
-    for (const asset of MOCK_ASSETS) {
-      // Fetch market data with retries
-      let data: AssetData | null = null;
-      let dataAttempts = 0;
-      const maxDataAttempts = 3;
-      
-      while (dataAttempts < maxDataAttempts && !data) {
-        try {
-          data = await fetchAssetData(asset.symbol);
-          if (data) {
-            dataMap.set(asset.symbol, data);
-            break;
-          } else {
-            // fetchAssetData returned null - retry
-            dataAttempts++;
-            if (dataAttempts < maxDataAttempts) {
-              console.log(`Retrying market data for ${asset.symbol} (attempt ${dataAttempts + 1}/${maxDataAttempts})...`);
-              await new Promise(resolve => setTimeout(resolve, 1000 * dataAttempts));
-            }
-          }
-        } catch (error: any) {
-          dataAttempts++;
-          if (dataAttempts < maxDataAttempts) {
-            console.log(`Retrying market data for ${asset.symbol} after error (attempt ${dataAttempts + 1}/${maxDataAttempts}):`, error?.message || error);
-            await new Promise(resolve => setTimeout(resolve, 1000 * dataAttempts));
-          } else {
-            console.error(`Failed to fetch market data for ${asset.symbol} after ${maxDataAttempts} attempts:`, error?.message || error);
-          }
-        }
-      }
-      
-      if (!data) {
-        console.warn(`⚠️ No market data available for ${asset.symbol} after ${maxDataAttempts} attempts`);
-      }
-      
-      // Fetch flash loan liquidity with retries
-      let liquidity = 0;
-      let liquidityAttempts = 0;
-      const maxLiquidityAttempts = 3;
-      
-      while (liquidityAttempts < maxLiquidityAttempts) {
-        try {
-          liquidity = await getFlashLoanLiquidity(asset.symbol, CONTRACT_ADDRESSES.HUB_NEW);
-          liquidityMap.set(asset.symbol, liquidity);
-          break;
-        } catch (error: any) {
-          liquidityAttempts++;
-          if (liquidityAttempts < maxLiquidityAttempts) {
-            await new Promise(resolve => setTimeout(resolve, 1000 * liquidityAttempts));
-          } else {
-            console.error(`Failed to fetch flash loan liquidity for ${asset.symbol} after ${maxLiquidityAttempts} attempts:`, error?.message || error);
-            liquidityMap.set(asset.symbol, 0); // Set to 0 on failure
-          }
-        }
-      }
+    if (hasNoData && !hasLoadedOnce) {
+      setIsLoading(true);
+    } else {
+      // If we have data (in state or cache), don't show loading
+      setIsLoading(false);
     }
     
-    setAssetsData(dataMap);
-    setFlashLoanLiquidity(liquidityMap);
-    setIsLoading(false);
+    try {
+      // ALWAYS start with cache first (it persists across remounts)
+      // This ensures we have data even if state hasn't updated yet from useEffect
+      const dataMap = new Map<string, AssetData>(cachedData);
+      // Then merge with current state data (state takes precedence if it exists)
+      assetsData.forEach((value, key) => {
+        if (value) { // Only merge if state has actual data
+          dataMap.set(key, value);
+        }
+      });
+      const liquidityMap = new Map<string, number>(flashLoanLiquidity);
+      
+      // Debug: log cache status
+      if (cachedData.size > 0) {
+        console.log(`📦 FlashLoans: Starting with ${cachedData.size} cached assets, state has ${assetsData.size} assets`);
+      }
+      
+      // Fetch data for all assets with retry logic
+      for (const asset of MOCK_ASSETS) {
+        // Fetch market data with retries
+        let data: AssetData | null = null;
+        let dataAttempts = 0;
+        const maxDataAttempts = 2; // Reduced retries since we have caching
+        
+        while (dataAttempts < maxDataAttempts && !data) {
+          try {
+            data = await fetchAssetData(asset.symbol, true); // Use cache
+            if (data) {
+              dataMap.set(asset.symbol, data);
+              break;
+            } else {
+              // fetchAssetData returned null - check if we have cached data to keep
+              if (dataMap.has(asset.symbol)) {
+                // Keep existing cached data, don't retry
+                break;
+              }
+              // No cached data, retry
+              dataAttempts++;
+              if (dataAttempts < maxDataAttempts) {
+                console.log(`Retrying market data for ${asset.symbol} (attempt ${dataAttempts + 1}/${maxDataAttempts})...`);
+                await new Promise(resolve => setTimeout(resolve, 1000 * dataAttempts));
+              }
+            }
+          } catch (error: any) {
+            dataAttempts++;
+            if (dataAttempts < maxDataAttempts) {
+              console.log(`Retrying market data for ${asset.symbol} after error (attempt ${dataAttempts + 1}/${maxDataAttempts}):`, error?.message || error);
+              await new Promise(resolve => setTimeout(resolve, 1000 * dataAttempts));
+            } else {
+              console.error(`Failed to fetch market data for ${asset.symbol} after ${maxDataAttempts} attempts:`, error?.message || error);
+              // Keep cached data if available, don't remove it
+            }
+          }
+        }
+        
+        // If we still don't have data but have cached data, keep the cached data
+        if (!data && !dataMap.has(asset.symbol)) {
+          console.warn(`⚠️ No market data available for ${asset.symbol} after ${maxDataAttempts} attempts`);
+        }
+        
+        // Fetch flash loan liquidity with retries
+        let liquidity = 0;
+        let liquidityAttempts = 0;
+        const maxLiquidityAttempts = 2; // Reduced retries
+        
+        while (liquidityAttempts < maxLiquidityAttempts) {
+          try {
+            liquidity = await getFlashLoanLiquidity(asset.symbol, CONTRACT_ADDRESSES.HUB_NEW);
+            liquidityMap.set(asset.symbol, liquidity);
+            break;
+          } catch (error: any) {
+            liquidityAttempts++;
+            if (liquidityAttempts < maxLiquidityAttempts) {
+              await new Promise(resolve => setTimeout(resolve, 1000 * liquidityAttempts));
+            } else {
+              console.error(`Failed to fetch flash loan liquidity for ${asset.symbol} after ${maxLiquidityAttempts} attempts:`, error?.message || error);
+              liquidityMap.set(asset.symbol, 0); // Set to 0 on failure
+            }
+          }
+        }
+      }
+      
+      // Final update - dataMap already has cached data merged in, so it should never be empty
+      console.log(`💾 FlashLoans: Updating state with ${dataMap.size} assets, ${liquidityMap.size} liquidity entries`);
+      setAssetsData(dataMap);
+      setFlashLoanLiquidity(liquidityMap);
+      
+      // Mark as loaded after first load attempt (even if some assets failed)
+      if (!hasLoadedOnce) {
+        setHasLoadedOnce(true);
+        setIsLoading(false);
+      }
+    } catch (error) {
+      console.error('Error loading flash loan data:', error);
+      // On first load error, still mark as loaded to prevent infinite loading
+      if (!hasLoadedOnce) {
+        setHasLoadedOnce(true);
+        setIsLoading(false);
+      }
+    }
   };
 
+  // Always get cached data as fallback (React state updates are async, so state might be empty even after setState)
+  const cachedDataForDisplay = getCachedAssetData();
+  
   const assets: Asset[] = MOCK_ASSETS.map(asset => {
-    const data = assetsData.get(asset.symbol);
-    const liquidity = flashLoanLiquidity.get(asset.symbol) || 0;
+    // Use state data first, always fallback to cache (handles remount scenario where state hasn't updated yet)
+    const data = assetsData.get(asset.symbol) || cachedDataForDisplay.get(asset.symbol);
+    // Use flashLoanLiquidity state first, but if empty, calculate from cached asset data's liquidity
+    // This prevents "No liquidity" flash when switching tabs
+    let liquidity = flashLoanLiquidity.get(asset.symbol);
+    if (liquidity === undefined || liquidity === 0) {
+      // If state doesn't have liquidity, try to get it from cached asset data
+      const cachedData = cachedDataForDisplay.get(asset.symbol);
+      if (cachedData && cachedData.liquidity !== undefined) {
+        liquidity = cachedData.liquidity;
+      } else {
+        liquidity = 0;
+      }
+    }
     return {
       ...asset,
       supplyApy: data?.supplyApy ?? 0,
@@ -390,7 +509,7 @@ export default function FlashLoans() {
                               <span className="font-medium text-gray-900">
                                 {liquidity.toLocaleString(undefined, { maximumFractionDigits: 2 })} {asset.symbol}
                               </span>
-                              <p className="text-xs text-gray-500 mt-0.5">Same pool as borrows</p>
+                              <p className="text-xs text-gray-500 mt-0.5">Available after borrows</p>
                             </div>
                           ) : (
                             <span className="text-gray-400">No liquidity</span>
@@ -406,7 +525,7 @@ export default function FlashLoans() {
                             variant="secondary"
                             size="sm"
                             onClick={() => setSelectedAsset(asset)}
-                            disabled={!hasLiquidity}
+                            disabled={!hasLiquidity || asset.symbol === 'EURC' || asset.symbol === 'USDT'}
                           >
                             Flash Loan
                           </Button>

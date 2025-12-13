@@ -64,7 +64,7 @@ The protocol uses a unified architecture where all operations share the same liq
 │    Spoke    │   │  Direct Hub │
 │ (Supply/    │   │  (Flash     │
 │  Borrow)    │   │   Loans)    │
-└──────┬──────┘   └──────┬───────┘
+└──────┬──────┘   └──────┬──────┘
        │                 │
        └────────┬────────┘
                 │
@@ -272,7 +272,7 @@ npm run dev
 yarn dev
 ```
 
-The frontend will be available at `http://localhost:5173`
+The frontend will be available at `http://localhost:3000`
 
 ## Development
 

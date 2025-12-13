@@ -29,6 +29,7 @@ export const ARC_TESTNET: Chain = {
 // Shared public client using WebSocket for better performance and to avoid rate limits
 // This creates a single persistent connection that can be reused across all functions
 let sharedPublicClient: PublicClient | null = null;
+let isWebSocketConnected = false;
 
 // Request throttling to stay under rate limits (20 requests/second)
 let requestQueue: Array<{ fn: () => Promise<any>; resolve: (value: any) => void; reject: (error: any) => void }> = [];
@@ -88,6 +89,13 @@ function throttledRequest<T>(requestFn: () => Promise<T>): Promise<T> {
 // Wrapper for readContract that respects rate limits
 export async function readContractWithThrottle<T>(params: any): Promise<T> {
   const publicClient = getPublicClient();
+  
+  // Log WebSocket usage on first call (for debugging)
+  if (isWebSocketConnected && !(globalThis as any).__wsLogged) {
+    (globalThis as any).__wsLogged = true;
+    console.log('📡 Using WebSocket for RPC calls (faster, persistent connection)');
+  }
+  
   return throttledRequest(() => publicClient.readContract(params) as Promise<T>);
 }
 
@@ -101,17 +109,24 @@ export function getPublicClient(): PublicClient {
   if (!sharedPublicClient) {
     // Try to use WebSocket, fallback to HTTP if WebSocket fails
     try {
+      const wsTransport = webSocket('wss://rpc.testnet.arc.network', {
+        reconnect: true,
+        retryCount: 5,
+        retryDelay: 1000,
+      });
+      
       sharedPublicClient = createPublicClient({
         chain: ARC_TESTNET,
-        transport: webSocket('wss://rpc.testnet.arc.network', {
-          reconnect: true,
-          retryCount: 5,
-          retryDelay: 1000,
-        }),
+        transport: wsTransport,
       });
-      console.log('✅ Connected to Arc Testnet via WebSocket');
+      
+      // Note: WebSocket connection is lazy - it connects on first request
+      // We'll verify it's working on the first call
+      isWebSocketConnected = true;
+      console.log('✅ Initialized WebSocket transport for Arc Testnet (connection will be established on first request)');
     } catch (error) {
-      console.warn('WebSocket connection failed, falling back to HTTP:', error);
+      console.warn('WebSocket initialization failed, falling back to HTTP:', error);
+      isWebSocketConnected = false;
       sharedPublicClient = createPublicClient({
         chain: ARC_TESTNET,
         transport: http(),
@@ -119,6 +134,11 @@ export function getPublicClient(): PublicClient {
     }
   }
   return sharedPublicClient;
+}
+
+// Helper to check if we're using WebSocket
+export function isUsingWebSocket(): boolean {
+  return isWebSocketConnected;
 }
 
 
@@ -129,6 +149,43 @@ const CACHE_TTL = 60000; // 1 minute cache
 
 // Cache for reserve data to avoid repeated contract calls
 const reserveDataCache = new Map<string, { reserveId: bigint; reserve: any; timestamp: number }>();
+
+// Cache for asset data (market data) - longer TTL since it changes less frequently
+const assetDataCache = new Map<string, { data: any; timestamp: number }>();
+const ASSET_DATA_CACHE_TTL = 120000; // 2 minutes cache for market data
+
+// Helper to check if we have cached data for any asset
+export function hasCachedAssetData(): boolean {
+  const now = Date.now();
+  for (const [symbol, cached] of assetDataCache.entries()) {
+    if (cached && (now - cached.timestamp) < ASSET_DATA_CACHE_TTL) {
+      return true; // We have at least one valid cached asset
+    }
+  }
+  return false;
+}
+
+// Helper to get all cached asset data (for immediate state population on remount)
+// Returns all valid cached data (even if some values are zero - that's still valid data)
+export function getCachedAssetData(): Map<string, AssetData> {
+  const result = new Map<string, AssetData>();
+  const now = Date.now();
+  for (const [symbol, cached] of assetDataCache.entries()) {
+    if (cached && (now - cached.timestamp) < ASSET_DATA_CACHE_TTL) {
+      const data = cached.data;
+      // Return all cached data - even if some values are zero, it's still valid cached state
+      // The UI can decide what to display, but we want to preserve the state
+      if (data) {
+        result.set(symbol, data);
+        console.log(`📦 Cache hit for ${symbol}: liquidity=${data.liquidity}, supplyApy=${data.supplyApy}, borrowApy=${data.borrowApy}, collateralFactor=${data.collateralFactor}`);
+      }
+    } else if (cached) {
+      console.log(`⏰ Cache expired for ${symbol} (age: ${now - cached.timestamp}ms)`);
+    }
+  }
+  console.log(`📦 getCachedAssetData: Returning ${result.size} assets from cache (total cache size: ${assetDataCache.size})`);
+  return result;
+}
 
 // Contract ABIs (simplified - only what we need)
 const SPOKE_ABI = [
@@ -1845,9 +1902,17 @@ async function getAssetPrice(assetSymbol: string): Promise<number> {
 /**
  * Fetch asset data (market data) for any asset
  */
-export async function fetchAssetData(assetSymbol: string): Promise<AssetData | null> {
+export async function fetchAssetData(assetSymbol: string, useCache = true): Promise<AssetData | null> {
   if (SPOKE_ADDRESS === '0x0000000000000000000000000000000000000000') {
     return null;
+  }
+
+  // Check cache first
+  if (useCache) {
+    const cached = assetDataCache.get(assetSymbol);
+    if (cached && (Date.now() - cached.timestamp) < ASSET_DATA_CACHE_TTL) {
+      return cached.data;
+    }
   }
 
   // Get asset address
@@ -2088,7 +2153,7 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
       liquidityFormatted = parseFloat(formatUnits(suppliedAssets, decimals));
     }
 
-    return {
+    const result = {
       supplyApy: Math.max(0, supplyApy),
       borrowApy: Math.max(0, borrowApy),
       liquidity: liquidityFormatted,
@@ -2096,6 +2161,15 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
       price,
       decimals: Number(decimals),
     };
+
+    // Always cache the result (even if zeros) - we'll filter when reading
+    // This ensures we have data to show even if it's temporarily zero
+    if (useCache) {
+      assetDataCache.set(assetSymbol, { data: result, timestamp: Date.now() });
+      console.log(`💾 Cached ${assetSymbol}: liquidity=${result.liquidity}, supplyApy=${result.supplyApy}, borrowApy=${result.borrowApy}, collateralFactor=${result.collateralFactor}`);
+    }
+
+    return result;
   } catch (error: any) {
     // Log the error with more context
     console.error(`Error fetching ${assetSymbol} data:`, {
@@ -2104,6 +2178,13 @@ export async function fetchAssetData(assetSymbol: string): Promise<AssetData | n
       assetAddress,
       stack: error?.stack,
     });
+    
+    // Return cached data if available (stale-while-revalidate)
+    const cached = assetDataCache.get(assetSymbol);
+    if (cached) {
+      console.log(`Using cached data for ${assetSymbol} due to fetch error`);
+      return cached.data;
+    }
     
     // Return null to indicate failure - caller should retry
     return null;

@@ -2,7 +2,7 @@ import React, { useContext, useEffect, useState } from 'react';
 import { Card, TableHeader, TableRow, TableCell, Button, LoadingDots } from '../components/UI';
 import { MOCK_ASSETS } from '../constants';
 import { ModalContext } from './AppLayout';
-import { fetchAssetData, type AssetData } from '../services/contracts';
+import { fetchAssetData, hasCachedAssetData, type AssetData } from '../services/contracts';
 import { Asset } from '../types';
 import { CONTRACT_ADDRESSES } from '../config/contracts';
 
@@ -10,22 +10,36 @@ export default function Markets() {
   const { openAssetModal } = useContext(ModalContext);
   const [assetsData, setAssetsData] = useState<Map<string, AssetData>>(new Map());
   const [isLoading, setIsLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
   useEffect(() => {
     const loadData = async () => {
-      setIsLoading(true);
-      const dataMap = new Map<string, AssetData>();
+      // Check if we have data in state OR in the service cache
+      // This handles component remounts - if cache has data, don't show loading
+      const hasStateData = assetsData.size > 0;
+      const hasCachedData = hasCachedAssetData();
+      const hasNoData = !hasStateData && !hasCachedData;
       
-      // Fetch data for all assets with retry logic
-      for (const asset of MOCK_ASSETS) {
+      if (hasNoData && !hasLoadedOnce) {
+        setIsLoading(true);
+      } else {
+        // If we have data (in state or cache), don't show loading
+        setIsLoading(false);
+      }
+      
+      try {
+        const dataMap = new Map<string, AssetData>(assetsData); // Start with cached data
+        
+        // Fetch data for all assets with retry logic
+        for (const asset of MOCK_ASSETS) {
         let data: AssetData | null = null;
         let attempts = 0;
-        const maxAttempts = 3;
+        const maxAttempts = 2; // Reduced retries since we have caching
         
-        // Retry up to 3 times for each asset
+        // Retry up to 2 times for each asset
         while (attempts < maxAttempts && !data) {
           try {
-            data = await fetchAssetData(asset.symbol);
+            data = await fetchAssetData(asset.symbol, true); // Use cache
             if (data) {
               dataMap.set(asset.symbol, data);
               break; // Success, move to next asset
@@ -56,8 +70,22 @@ export default function Markets() {
         }
       }
       
-      setAssetsData(dataMap);
-      setIsLoading(false);
+        // Final update
+        setAssetsData(dataMap);
+        
+        // Mark as loaded after first load attempt (even if some assets failed)
+        if (!hasLoadedOnce) {
+          setHasLoadedOnce(true);
+          setIsLoading(false);
+        }
+      } catch (error) {
+        console.error('Error loading market data:', error);
+        // On first load error, still mark as loaded to prevent infinite loading
+        if (!hasLoadedOnce) {
+          setHasLoadedOnce(true);
+          setIsLoading(false);
+        }
+      }
     };
 
     loadData();
