@@ -5,6 +5,7 @@ import { ModalContext } from './AppLayout';
 import { fetchAssetData, hasCachedAssetData, type AssetData } from '../services/contracts';
 import { Asset } from '../types';
 import { CONTRACT_ADDRESSES } from '../config/contracts';
+import { AlertCircle, Info } from 'lucide-react';
 
 export default function Markets() {
   const { openAssetModal } = useContext(ModalContext);
@@ -119,7 +120,7 @@ export default function Markets() {
       {!isContractAddressSet && (
         <Card className="bg-amber-50 border-amber-200">
           <div className="flex items-start gap-3">
-            <div className="text-amber-600 text-lg">⚠️</div>
+            <AlertCircle className="text-amber-600 shrink-0 mt-0.5" size={20} />
             <div>
               <h3 className="font-semibold text-amber-900 mb-1">Contract Address Not Configured</h3>
               <p className="text-sm text-amber-700">
@@ -134,7 +135,7 @@ export default function Markets() {
       {isContractAddressSet && !isLoading && assets.length === 0 && (
         <Card className="bg-blue-50 border-blue-200">
           <div className="flex items-start gap-3">
-            <div className="text-blue-600 text-lg">ℹ️</div>
+            <Info className="text-blue-600 shrink-0 mt-0.5" size={20} />
             <div>
               <h3 className="font-semibold text-blue-900 mb-1">No Reserves Configured</h3>
               <p className="text-sm text-blue-700">
